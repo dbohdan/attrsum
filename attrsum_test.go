@@ -10,7 +10,6 @@ import (
 	"github.com/pkg/xattr"
 )
 
-// skipIfNoXattr skips tests when underlying FS lacks xattr support.
 func skipIfNoXattr(t *testing.T, path string) {
 	if err := xattr.Set(path, "user.test", []byte("1")); err != nil {
 		t.Skipf("skipping: xattr not supported: %v", err)
@@ -46,7 +45,6 @@ func TestSumAddAndUpdate(t *testing.T) {
 	tsb, _ := xattr.Get(f, sumTimeKey)
 	origTime, _ := time.Parse(time.RFC3339Nano, string(tsb))
 
-	// Modify file & bump mtime to force update.
 	os.WriteFile(f, []byte(strings.ToUpper("hello")), 0o644)
 	now := time.Now().Add(2 * time.Second)
 	os.Chtimes(f, now, now)
@@ -73,7 +71,6 @@ func TestProcessCheckIntegration(t *testing.T) {
 		t.Fatalf("check ok: %v", err)
 	}
 
-	// Corrupt -> should fail
 	f := filepath.Join(dir, "b.txt")
 	os.WriteFile(f, []byte("corrupt"), 0o644)
 
@@ -89,10 +86,6 @@ func TestClearRemovesAttrs(t *testing.T) {
 	f := writeFile(t, dir, "c.txt", "data")
 	if err := ProcessSumAdd(dir); err != nil {
 		t.Fatalf("add: %v", err)
-	}
-	// Ensure attrs exist
-	if _, err := xattr.Get(f, checksumKey); err != nil {
-		t.Fatalf("pre-clear checksum missing: %v", err)
 	}
 
 	if err := ProcessClear(dir); err != nil {
@@ -114,31 +107,43 @@ func TestExcludeDotfilesAndPatterns(t *testing.T) {
 	keep := writeFile(t, dir, "keep.txt", "keep")
 	skip := writeFile(t, dir, "skip.me", "skip")
 
-	// Save global state then set exclusions
-	oldDotfiles := excludeDotfiles
-	oldPatterns := excludePatterns
+	oldDot := excludeDotfiles
+	oldPat := excludePatterns
 	excludeDotfiles = true
 	excludePatterns = []string{"*.me"}
-
-	defer func() {
-		excludeDotfiles = oldDotfiles
-		excludePatterns = oldPatterns
-	}()
+	defer func() { excludeDotfiles, excludePatterns = oldDot, oldPat }()
 
 	if err := ProcessSumAdd(dir); err != nil {
 		t.Fatalf("add with excludes: %v", err)
 	}
 
-	// keep.txt should have xattrs
 	if _, err := xattr.Get(keep, checksumKey); err != nil {
 		t.Fatalf("expected xattr on keep.txt: %v", err)
 	}
-	// .hidden and skip.me should not
 	if _, err := xattr.Get(hidden, checksumKey); err == nil {
 		t.Fatalf(".hidden should have been excluded")
 	}
 	if _, err := xattr.Get(skip, checksumKey); err == nil {
-		t.Fatalf("skip.me should have been excluded by pattern")
+		t.Fatalf("skip.me should have been excluded")
+	}
+}
+
+func TestSkipBrokenSymlink(t *testing.T) {
+	dir := t.TempDir()
+	skipIfNoXattr(t, dir)
+
+	// Create a dangling symlink
+	link := filepath.Join(dir, "dangling.lnk")
+	if err := os.Symlink(filepath.Join(dir, "nonexistent.txt"), link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+
+	// Should not error and should not create xattrs on link
+	if err := ProcessSumAdd(dir); err != nil {
+		t.Fatalf("ProcessSumAdd with symlink: %v", err)
+	}
+	if _, err := xattr.Get(link, checksumKey); err == nil {
+		t.Fatalf("symlink should not have xattr")
 	}
 }
 

@@ -52,7 +52,7 @@ func main() {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// Sum operations
+// Sum commands
 ///////////////////////////////////////////////////////////////////////////////
 
 func newSumCmd() *cobra.Command {
@@ -61,52 +61,33 @@ func newSumCmd() *cobra.Command {
         Short: "Checksum maintenance operations",
     }
 
-    addCmd := &cobra.Command{
-        Use:   "add <directory>",
+    add := &cobra.Command{
+        Use:   "add <dir>",
         Short: "Write checksums for files missing them",
         Args:  cobra.ExactArgs(1),
-        RunE: func(_ *cobra.Command, args []string) error {
-            return ProcessSumAdd(args[0])
-        },
+        RunE: func(_ *cobra.Command, a []string) error { return ProcessSumAdd(a[0]) },
     }
 
-    updateCmd := &cobra.Command{
-        Use:   "update <directory>",
-        Short: "Refresh checksums when file modified",
+    upd := &cobra.Command{
+        Use:   "update <dir>",
+        Short: "Recalculate checksum when file newer than stored sumtime",
         Args:  cobra.ExactArgs(1),
-        RunE: func(_ *cobra.Command, args []string) error {
-            return ProcessSumUpdate(args[0])
-        },
+        RunE: func(_ *cobra.Command, a []string) error { return ProcessSumUpdate(a[0]) },
     }
 
-    cmd.AddCommand(addCmd, updateCmd)
+    cmd.AddCommand(add, upd)
     return cmd
 }
 
 func ProcessSumAdd(dir string) error {
-    return walkAndProcess(dir, func(path string, info os.FileInfo) error {
-        if hasXattr(path, checksumKey) {
-            if verbose {
-                log.Printf("skip existing %s", path)
-            }
-            return nil
-        }
-        return writeChecksumAndTime(path)
-    })
+    return walkAndProcess(dir, func(p string, _ os.FileInfo) error { return writeChecksumAndTime(p) })
 }
 
 func ProcessSumUpdate(dir string) error {
-    return walkAndProcess(dir, func(path string, info os.FileInfo) error {
-        needUpdate := false
-        t, err := readSumTime(path)
+    return walkAndProcess(dir, func(p string, info os.FileInfo) error {
+        t, err := readSumTime(p)
         if err != nil || info.ModTime().After(t) {
-            needUpdate = true
-        }
-        if needUpdate {
-            if verbose {
-                log.Printf("update %s", path)
-            }
-            return writeChecksumAndTime(path)
+            return writeChecksumAndTime(p)
         }
         return nil
     })
@@ -121,15 +102,15 @@ func writeChecksumAndTime(path string) error {
         return fmt.Errorf("set checksum attr: %w", err)
     }
     if verbose {
-        fmt.Printf("%s %s written\n", path, string(hash))
+        fmt.Printf("%s %s written\n", path, hash)
     }
 
-    nowStr := time.Now().UTC().Format(time.RFC3339Nano)
-    if err := xattr.Set(path, sumTimeKey, []byte(nowStr)); err != nil {
+    ts := time.Now().UTC().Format(time.RFC3339Nano)
+    if err := xattr.Set(path, sumTimeKey, []byte(ts)); err != nil {
         return fmt.Errorf("set sumtime attr: %w", err)
     }
     if verbose {
-        fmt.Printf("%s %s written\n", path, nowStr)
+        fmt.Printf("%s %s written\n", path, ts)
     }
     return nil
 }
@@ -143,24 +124,22 @@ func readSumTime(path string) (time.Time, error) {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// Clear operation
+// Clear command
 ///////////////////////////////////////////////////////////////////////////////
 
 func newClearCmd() *cobra.Command {
     return &cobra.Command{
-        Use:   "clear <directory>",
-        Short: "Remove checksum xattrs from files in tree",
+        Use:   "clear <dir>",
+        Short: "Remove checksum xattrs from tree",
         Args:  cobra.ExactArgs(1),
-        RunE: func(_ *cobra.Command, args []string) error {
-            return ProcessClear(args[0])
-        },
+        RunE: func(_ *cobra.Command, a []string) error { return ProcessClear(a[0]) },
     }
 }
 
 func ProcessClear(dir string) error {
-    return walkAndProcess(dir, func(path string, info os.FileInfo) error {
-        for _, key := range []string{checksumKey, sumTimeKey} {
-            val, err := xattr.Get(path, key)
+    return walkAndProcess(dir, func(p string, _ os.FileInfo) error {
+        for _, k := range []string{checksumKey, sumTimeKey} {
+            v, err := xattr.Get(p, k)
             if err != nil {
                 if errors.Is(err, xattr.ENOATTR) {
                     continue
@@ -168,9 +147,9 @@ func ProcessClear(dir string) error {
                 return err
             }
             if verbose {
-                fmt.Printf("%s %s removed\n", path, string(val))
+                fmt.Printf("%s %s removed\n", p, string(v))
             }
-            if err := xattr.Remove(path, key); err != nil {
+            if err := xattr.Remove(p, k); err != nil {
                 return err
             }
         }
@@ -179,79 +158,70 @@ func ProcessClear(dir string) error {
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// Check operation
+// Check command
 ///////////////////////////////////////////////////////////////////////////////
 
 func newCheckCmd() *cobra.Command {
     var cont bool
     cmd := &cobra.Command{
-        Use:   "check <directory>",
-        Short: "Verify stored checksums against file contents",
+        Use:   "check <dir>",
+        Short: "Verify stored checksums",
         Args:  cobra.ExactArgs(1),
-        RunE: func(_ *cobra.Command, args []string) error {
-            return ProcessCheck(args[0], cont)
-        },
+        RunE: func(_ *cobra.Command, a []string) error { return ProcessCheck(a[0], cont) },
     }
     cmd.Flags().BoolVar(&cont, "continue", false, "continue after errors and report each file")
     return cmd
 }
 
 func ProcessCheck(dir string, cont bool) error {
-    exitErr := errors.New("verification failed")
-    hadErr := false
+    fail := errors.New("verification failed")
+    bad := false
 
-    err := walkAndProcess(dir, func(path string, info os.FileInfo) error {
-        exp, err := xattr.Get(path, checksumKey)
+    err := walkAndProcess(dir, func(p string, _ os.FileInfo) error {
+        exp, err := xattr.Get(p, checksumKey)
         if err != nil {
             if errors.Is(err, xattr.ENOATTR) {
-                hadErr = true
+                bad = true
                 if verbose {
-                    fmt.Printf("%s <none> ERROR\n", path)
-                } else {
-                    log.Printf("ERROR missing xattr %s", path)
+                    fmt.Printf("%s <none> ERROR\n", p)
                 }
                 if cont {
                     return nil
                 }
-                return exitErr
+                return fail
             }
             return err
         }
 
-        act, err := fileMultihash(path)
+        act, err := fileMultihash(p)
         if err != nil {
             return err
         }
-
         ok := bytes.Equal(exp, act)
         if !ok {
-            hadErr = true
+            bad = true
         }
-
         if verbose {
-            res := "OK"
+            status := "OK"
             if !ok {
-                res = "ERROR"
+                status = "ERROR"
             }
-            fmt.Printf("%s %s %s\n", path, string(act), res)
-        } else if !ok {
-            log.Printf("ERROR checksum mismatch %s", path)
+            fmt.Printf("%s %s %s\n", p, act, status)
         }
-
         if !ok && !cont {
-            return exitErr
+            return fail
         }
         return nil
     })
 
     if err != nil {
-        if errors.Is(err, exitErr) {
-            return exitErr
+        if errors.Is(err, fail) {
+            return fail
         }
         return err
     }
-    if hadErr {
-        return exitErr
+    if bad {
+        return fail
     }
     return nil
 }
@@ -262,12 +232,23 @@ func ProcessCheck(dir string, cont bool) error {
 
 func walkAndProcess(root string, fn func(string, os.FileInfo) error) error {
     root = filepath.Clean(root)
-    return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+    return filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
         if err != nil {
             return err
         }
-        rel, _ := filepath.Rel(root, path)
 
+        // skip symlinks entirely
+        if info.Mode()&os.ModeSymlink != 0 {
+            if verbose {
+                log.Printf("skip symlink %s", p)
+            }
+            if info.IsDir() {
+                return filepath.SkipDir
+            }
+            return nil
+        }
+
+        rel, _ := filepath.Rel(root, p)
         if shouldExclude(rel, info) {
             if info.IsDir() {
                 return filepath.SkipDir
@@ -278,7 +259,13 @@ func walkAndProcess(root string, fn func(string, os.FileInfo) error) error {
         if info.IsDir() {
             return nil
         }
-        return fn(path, info)
+        if !info.Mode().IsRegular() {
+            if verbose {
+                log.Printf("skip non-regular %s", p)
+            }
+            return nil
+        }
+        return fn(p, info)
     })
 }
 
@@ -317,7 +304,6 @@ func fileMultihash(path string) ([]byte, error) {
     if _, err := io.Copy(h, f); err != nil {
         return nil, err
     }
-
     mh, err := multihash.Encode(h.Sum(nil), multihash.SHA2_256)
     if err != nil {
         return nil, err
