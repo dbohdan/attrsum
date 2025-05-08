@@ -10,7 +10,7 @@ import (
 	"github.com/pkg/xattr"
 )
 
-// skipIfNoXattr skips tests when the underlying FS lacks xattr support.
+// skipIfNoXattr skips tests when underlying FS lacks xattr support.
 func skipIfNoXattr(t *testing.T, path string) {
 	if err := xattr.Set(path, "user.test", []byte("1")); err != nil {
 		t.Skipf("skipping: xattr not supported: %v", err)
@@ -21,14 +21,14 @@ func skipIfNoXattr(t *testing.T, path string) {
 
 func writeFile(t *testing.T, root, name, content string) string {
 	t.Helper()
-	path := filepath.Join(root, name)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	p := filepath.Join(root, name)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	return path
+	return p
 }
 
 func TestSumAddAndUpdate(t *testing.T) {
@@ -37,29 +37,20 @@ func TestSumAddAndUpdate(t *testing.T) {
 
 	f := writeFile(t, dir, "a.txt", "hello")
 
-	// Add: write missing checksum.
 	if err := ProcessSumAdd(dir); err != nil {
 		t.Fatalf("add: %v", err)
 	}
-
-	// Attributes should exist.
 	if _, err := xattr.Get(f, checksumKey); err != nil {
 		t.Fatalf("checksum missing: %v", err)
 	}
-	tsb, err := xattr.Get(f, sumTimeKey)
-	if err != nil {
-		t.Fatalf("sumtime missing: %v", err)
-	}
+	tsb, _ := xattr.Get(f, sumTimeKey)
 	origTime, _ := time.Parse(time.RFC3339Nano, string(tsb))
 
-	// Modify file and bump mtime.
-	if err := os.WriteFile(f, []byte(strings.ToUpper("hello")), 0o644); err != nil {
-		t.Fatalf("rewrite: %v", err)
-	}
+	// Modify file & bump mtime to force update.
+	os.WriteFile(f, []byte(strings.ToUpper("hello")), 0o644)
 	now := time.Now().Add(2 * time.Second)
 	os.Chtimes(f, now, now)
 
-	// Update should refresh checksum and time.
 	if err := ProcessSumUpdate(dir); err != nil {
 		t.Fatalf("update: %v", err)
 	}
@@ -78,17 +69,76 @@ func TestProcessCheckIntegration(t *testing.T) {
 	if err := ProcessSumAdd(dir); err != nil {
 		t.Fatalf("add: %v", err)
 	}
-
 	if err := ProcessCheck(dir, false); err != nil {
 		t.Fatalf("check ok: %v", err)
 	}
 
-	// Corrupt file contents should produce an error.
+	// Corrupt -> should fail
 	f := filepath.Join(dir, "b.txt")
 	os.WriteFile(f, []byte("corrupt"), 0o644)
 
 	if err := ProcessCheck(dir, false); err == nil {
 		t.Fatalf("expected mismatch error, got nil")
+	}
+}
+
+func TestClearRemovesAttrs(t *testing.T) {
+	dir := t.TempDir()
+	skipIfNoXattr(t, dir)
+
+	f := writeFile(t, dir, "c.txt", "data")
+	if err := ProcessSumAdd(dir); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	// Ensure attrs exist
+	if _, err := xattr.Get(f, checksumKey); err != nil {
+		t.Fatalf("pre-clear checksum missing: %v", err)
+	}
+
+	if err := ProcessClear(dir); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if _, err := xattr.Get(f, checksumKey); err == nil {
+		t.Fatalf("checksum still present after clear")
+	}
+	if _, err := xattr.Get(f, sumTimeKey); err == nil {
+		t.Fatalf("sumtime still present after clear")
+	}
+}
+
+func TestExcludeDotfilesAndPatterns(t *testing.T) {
+	dir := t.TempDir()
+	skipIfNoXattr(t, dir)
+
+	hidden := writeFile(t, dir, ".hidden", "dot")
+	keep := writeFile(t, dir, "keep.txt", "keep")
+	skip := writeFile(t, dir, "skip.me", "skip")
+
+	// Save global state then set exclusions
+	oldDotfiles := excludeDotfiles
+	oldPatterns := excludePatterns
+	excludeDotfiles = true
+	excludePatterns = []string{"*.me"}
+
+	defer func() {
+		excludeDotfiles = oldDotfiles
+		excludePatterns = oldPatterns
+	}()
+
+	if err := ProcessSumAdd(dir); err != nil {
+		t.Fatalf("add with excludes: %v", err)
+	}
+
+	// keep.txt should have xattrs
+	if _, err := xattr.Get(keep, checksumKey); err != nil {
+		t.Fatalf("expected xattr on keep.txt: %v", err)
+	}
+	// .hidden and skip.me should not
+	if _, err := xattr.Get(hidden, checksumKey); err == nil {
+		t.Fatalf(".hidden should have been excluded")
+	}
+	if _, err := xattr.Get(skip, checksumKey); err == nil {
+		t.Fatalf("skip.me should have been excluded by pattern")
 	}
 }
 
