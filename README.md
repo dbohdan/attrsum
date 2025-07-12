@@ -64,9 +64,8 @@ Flags:
 
 ## Why?
 
-Apple APFS and Linux ext3/ext4 **store no per-file metadata checksums**, so
-silent data corruption can pass unnoticed.  `attrsum` keeps a portable,
-tamper-evident checksum **inside each file’s xattrs**, providing integrity
+Apple APFS and Linux ext3/ext4 **store no per-file content checksums**, so
+silent data corruption can pass unnoticed.  `attrsum` keeps a portable checksum **inside each file’s xattrs**, providing integrity
 verification that travels with the file itself—no external database
 required.  Now you can trust a USB stick didn't eat your data.
 
