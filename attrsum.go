@@ -1,54 +1,121 @@
 package main
 
 import (
-    "bytes"
-    "crypto/sha256"
-    "errors"
-    "fmt"
-    "io"
-    "log"
-    "os"
-    "path/filepath"
-    "strings"
-    "time"
+	"bufio"
+	"bytes"
+	"crypto/sha256"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"time"
 
-    base58 "github.com/mr-tron/base58/base58"
-    "github.com/bmatcuk/doublestar/v4"
-    "github.com/multiformats/go-multihash"
-    "github.com/pkg/xattr"
-    "github.com/spf13/cobra"
+	"github.com/bmatcuk/doublestar/v4"
+	base58 "github.com/mr-tron/base58/base58"
+	"github.com/multiformats/go-multihash"
+	"github.com/pkg/xattr"
+	"github.com/schollz/progressbar/v3"
+	"github.com/spf13/cobra"
 )
 
 const (
-    checksumKey = "berlin.sneak.app.attrsum.checksum"
-    sumTimeKey  = "berlin.sneak.app.attrsum.sumtime"
+	checksumKey = "berlin.sneak.app.attrsum.checksum"
+	sumTimeKey  = "berlin.sneak.app.attrsum.sumtime"
 )
 
 var (
-    verbose         bool
-    excludePatterns []string
-    excludeDotfiles bool
+	verbose         bool
+	quiet           bool
+	excludePatterns []string
+	excludeDotfiles bool
 )
 
+// Stats tracks operation statistics for summary reporting
+type Stats struct {
+	FilesProcessed int64
+	FilesSkipped   int64
+	FilesFailed    int64
+	BytesProcessed int64
+	StartTime      time.Time
+}
+
+func (s *Stats) Duration() time.Duration {
+	return time.Since(s.StartTime)
+}
+
+func (s *Stats) Print(operation string) {
+	if quiet {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "\n%s complete: %d files processed, %d skipped, %d failed, %s bytes in %s\n",
+		operation,
+		s.FilesProcessed,
+		s.FilesSkipped,
+		s.FilesFailed,
+		formatBytes(s.BytesProcessed),
+		s.Duration().Round(time.Millisecond),
+	)
+}
+
+func formatBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
 func main() {
-    rootCmd := &cobra.Command{
-        Use:   "attrsum",
-        Short: "Compute and verify file checksums via xattrs",
-    }
-    rootCmd.SilenceUsage = true
-    rootCmd.SilenceErrors = true
+	rootCmd := &cobra.Command{
+		Use:   "attrsum",
+		Short: "Compute and verify file checksums via xattrs",
+	}
+	rootCmd.SilenceUsage = true
+	rootCmd.SilenceErrors = true
 
-    rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "enable verbose output")
-    rootCmd.PersistentFlags().StringArrayVar(&excludePatterns, "exclude", nil, "exclude files/directories matching pattern (rsync-style, repeatable)")
-    rootCmd.PersistentFlags().BoolVar(&excludeDotfiles, "exclude-dotfiles", false, "exclude any file or directory whose name starts with '.'")
+	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "enable verbose output")
+	rootCmd.PersistentFlags().BoolVarP(&quiet, "quiet", "q", false, "suppress all output except errors")
+	rootCmd.PersistentFlags().StringArrayVar(&excludePatterns, "exclude", nil, "exclude files/directories matching pattern (rsync-style, repeatable)")
+	rootCmd.PersistentFlags().BoolVar(&excludeDotfiles, "exclude-dotfiles", false, "exclude any file or directory whose name starts with '.'")
 
-    rootCmd.AddCommand(newSumCmd())
-    rootCmd.AddCommand(newCheckCmd())
-    rootCmd.AddCommand(newClearCmd())
+	rootCmd.AddCommand(newSumCmd())
+	rootCmd.AddCommand(newCheckCmd())
+	rootCmd.AddCommand(newClearCmd())
 
-    if err := rootCmd.Execute(); err != nil {
-        log.Fatal(err)
-    }
+	if err := rootCmd.Execute(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// expandPaths expands the given paths, reading from stdin if "-" is present
+func expandPaths(args []string) ([]string, error) {
+	var paths []string
+	for _, arg := range args {
+		if arg == "-" {
+			scanner := bufio.NewScanner(os.Stdin)
+			for scanner.Scan() {
+				line := strings.TrimSpace(scanner.Text())
+				if line != "" {
+					paths = append(paths, line)
+				}
+			}
+			if err := scanner.Err(); err != nil {
+				return nil, fmt.Errorf("reading stdin: %w", err)
+			}
+		} else {
+			paths = append(paths, arg)
+		}
+	}
+	return paths, nil
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -56,85 +123,115 @@ func main() {
 ///////////////////////////////////////////////////////////////////////////////
 
 func newSumCmd() *cobra.Command {
-    cmd := &cobra.Command{
-        Use:   "sum",
-        Short: "Checksum maintenance operations",
-    }
+	cmd := &cobra.Command{
+		Use:   "sum",
+		Short: "Checksum maintenance operations",
+	}
 
-    add := &cobra.Command{
-        Use:   "add <path>...",
-        Short: "Write checksums for files missing them",
-        Args:  cobra.MinimumNArgs(1),
-        RunE: func(_ *cobra.Command, a []string) error {
-            for _, p := range a {
-                if err := ProcessSumAdd(p); err != nil {
-                    return err
-                }
-            }
-            return nil
-        },
-    }
+	add := &cobra.Command{
+		Use:   "add <path>... (use - to read paths from stdin)",
+		Short: "Write checksums for files missing them",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(_ *cobra.Command, a []string) error {
+			paths, err := expandPaths(a)
+			if err != nil {
+				return err
+			}
+			stats := &Stats{StartTime: time.Now()}
+			for _, p := range paths {
+				if err := ProcessSumAdd(p, stats); err != nil {
+					return err
+				}
+			}
+			stats.Print("sum add")
+			return nil
+		},
+	}
 
-    upd := &cobra.Command{
-        Use:   "update <path>...",
-        Short: "Recalculate checksum when file newer than stored sumtime",
-        Args:  cobra.MinimumNArgs(1),
-        RunE: func(_ *cobra.Command, a []string) error {
-            for _, p := range a {
-                if err := ProcessSumUpdate(p); err != nil {
-                    return err
-                }
-            }
-            return nil
-        },
-    }
+	upd := &cobra.Command{
+		Use:   "update <path>... (use - to read paths from stdin)",
+		Short: "Recalculate checksum when file newer than stored sumtime",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(_ *cobra.Command, a []string) error {
+			paths, err := expandPaths(a)
+			if err != nil {
+				return err
+			}
+			stats := &Stats{StartTime: time.Now()}
+			for _, p := range paths {
+				if err := ProcessSumUpdate(p, stats); err != nil {
+					return err
+				}
+			}
+			stats.Print("sum update")
+			return nil
+		},
+	}
 
-    cmd.AddCommand(add, upd)
-    return cmd
+	cmd.AddCommand(add, upd)
+	return cmd
 }
 
-func ProcessSumAdd(dir string) error {
-    return walkAndProcess(dir, func(p string, _ os.FileInfo) error { return writeChecksumAndTime(p) })
+func ProcessSumAdd(dir string, stats *Stats) error {
+	return walkAndProcess(dir, stats, "Adding checksums", func(p string, info os.FileInfo, s *Stats) error {
+		if hasXattr(p, checksumKey) {
+			atomic.AddInt64(&s.FilesSkipped, 1)
+			return nil
+		}
+		if err := writeChecksumAndTime(p, info, s); err != nil {
+			atomic.AddInt64(&s.FilesFailed, 1)
+			return err
+		}
+		return nil
+	})
 }
 
-func ProcessSumUpdate(dir string) error {
-    return walkAndProcess(dir, func(p string, info os.FileInfo) error {
-        t, err := readSumTime(p)
-        if err != nil || info.ModTime().After(t) {
-            return writeChecksumAndTime(p)
-        }
-        return nil
-    })
+func ProcessSumUpdate(dir string, stats *Stats) error {
+	return walkAndProcess(dir, stats, "Updating checksums", func(p string, info os.FileInfo, s *Stats) error {
+		t, err := readSumTime(p)
+		if err != nil || info.ModTime().After(t) {
+			if err := writeChecksumAndTime(p, info, s); err != nil {
+				atomic.AddInt64(&s.FilesFailed, 1)
+				return err
+			}
+		} else {
+			atomic.AddInt64(&s.FilesSkipped, 1)
+		}
+		return nil
+	})
 }
 
-func writeChecksumAndTime(path string) error {
-    hash, err := fileMultihash(path)
-    if err != nil {
-        return err
-    }
-    if err := xattr.Set(path, checksumKey, hash); err != nil {
-        return fmt.Errorf("set checksum attr: %w", err)
-    }
-    if verbose {
-        fmt.Printf("%s %s written\n", path, hash)
-    }
+func writeChecksumAndTime(path string, info os.FileInfo, stats *Stats) error {
+	hash, err := fileMultihash(path)
+	if err != nil {
+		return err
+	}
+	if err := xattr.Set(path, checksumKey, hash); err != nil {
+		return fmt.Errorf("set checksum attr: %w", err)
+	}
+	if verbose && !quiet {
+		fmt.Printf("%s %s written\n", path, hash)
+	}
 
-    ts := time.Now().UTC().Format(time.RFC3339Nano)
-    if err := xattr.Set(path, sumTimeKey, []byte(ts)); err != nil {
-        return fmt.Errorf("set sumtime attr: %w", err)
-    }
-    if verbose {
-        fmt.Printf("%s %s written\n", path, ts)
-    }
-    return nil
+	ts := time.Now().UTC().Format(time.RFC3339Nano)
+	if err := xattr.Set(path, sumTimeKey, []byte(ts)); err != nil {
+		return fmt.Errorf("set sumtime attr: %w", err)
+	}
+	if verbose && !quiet {
+		fmt.Printf("%s %s written\n", path, ts)
+	}
+
+	atomic.AddInt64(&stats.FilesProcessed, 1)
+	atomic.AddInt64(&stats.BytesProcessed, info.Size())
+	return nil
 }
 
 func readSumTime(path string) (time.Time, error) {
-    b, err := xattr.Get(path, sumTimeKey)
-    if err != nil {
-        return time.Time{}, err
-    }
-    return time.Parse(time.RFC3339Nano, string(b))
+	b, err := xattr.Get(path, sumTimeKey)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.Parse(time.RFC3339Nano, string(b))
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -142,40 +239,56 @@ func readSumTime(path string) (time.Time, error) {
 ///////////////////////////////////////////////////////////////////////////////
 
 func newClearCmd() *cobra.Command {
-    return &cobra.Command{
-        Use:   "clear <path>...",
-        Short: "Remove checksum xattrs from tree",
-        Args:  cobra.MinimumNArgs(1),
-        RunE: func(_ *cobra.Command, a []string) error {
-            for _, p := range a {
-                if err := ProcessClear(p); err != nil {
-                    return err
-                }
-            }
-            return nil
-        },
-    }
+	return &cobra.Command{
+		Use:   "clear <path>... (use - to read paths from stdin)",
+		Short: "Remove checksum xattrs from tree",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(_ *cobra.Command, a []string) error {
+			paths, err := expandPaths(a)
+			if err != nil {
+				return err
+			}
+			stats := &Stats{StartTime: time.Now()}
+			for _, p := range paths {
+				if err := ProcessClear(p, stats); err != nil {
+					return err
+				}
+			}
+			stats.Print("clear")
+			return nil
+		},
+	}
 }
 
-func ProcessClear(dir string) error {
-    return walkAndProcess(dir, func(p string, _ os.FileInfo) error {
-        for _, k := range []string{checksumKey, sumTimeKey} {
-            v, err := xattr.Get(p, k)
-            if err != nil {
-                if errors.Is(err, xattr.ENOATTR) {
-                    continue
-                }
-                return err
-            }
-            if verbose {
-                fmt.Printf("%s %s removed\n", p, string(v))
-            }
-            if err := xattr.Remove(p, k); err != nil {
-                return err
-            }
-        }
-        return nil
-    })
+func ProcessClear(dir string, stats *Stats) error {
+	return walkAndProcess(dir, stats, "Clearing checksums", func(p string, info os.FileInfo, s *Stats) error {
+		cleared := false
+		for _, k := range []string{checksumKey, sumTimeKey} {
+			v, err := xattr.Get(p, k)
+			if err != nil {
+				if errors.Is(err, xattr.ENOATTR) {
+					continue
+				}
+				atomic.AddInt64(&s.FilesFailed, 1)
+				return err
+			}
+			if verbose && !quiet {
+				fmt.Printf("%s %s removed\n", p, string(v))
+			}
+			if err := xattr.Remove(p, k); err != nil {
+				atomic.AddInt64(&s.FilesFailed, 1)
+				return err
+			}
+			cleared = true
+		}
+		if cleared {
+			atomic.AddInt64(&s.FilesProcessed, 1)
+			atomic.AddInt64(&s.BytesProcessed, info.Size())
+		} else {
+			atomic.AddInt64(&s.FilesSkipped, 1)
+		}
+		return nil
+	})
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -183,158 +296,247 @@ func ProcessClear(dir string) error {
 ///////////////////////////////////////////////////////////////////////////////
 
 func newCheckCmd() *cobra.Command {
-    var cont bool
-    cmd := &cobra.Command{
-        Use:   "check <path>...",
-        Short: "Verify stored checksums",
-        Args:  cobra.MinimumNArgs(1),
-        RunE: func(_ *cobra.Command, a []string) error {
-            for _, p := range a {
-                if err := ProcessCheck(p, cont); err != nil {
-                    return err
-                }
-            }
-            return nil
-        },
-    }
-    cmd.Flags().BoolVar(&cont, "continue", false, "continue after errors and report each file")
-    return cmd
+	var cont bool
+	cmd := &cobra.Command{
+		Use:   "check <path>... (use - to read paths from stdin)",
+		Short: "Verify stored checksums",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(_ *cobra.Command, a []string) error {
+			paths, err := expandPaths(a)
+			if err != nil {
+				return err
+			}
+			stats := &Stats{StartTime: time.Now()}
+			var finalErr error
+			for _, p := range paths {
+				if err := ProcessCheck(p, cont, stats); err != nil {
+					if cont {
+						finalErr = err
+					} else {
+						stats.Print("check")
+						return err
+					}
+				}
+			}
+			stats.Print("check")
+			return finalErr
+		},
+	}
+	cmd.Flags().BoolVar(&cont, "continue", false, "continue after errors and report each file")
+	return cmd
 }
 
-func ProcessCheck(dir string, cont bool) error {
-    fail := errors.New("verification failed")
-    bad := false
+func ProcessCheck(dir string, cont bool, stats *Stats) error {
+	fail := errors.New("verification failed")
+	bad := false
 
-    err := walkAndProcess(dir, func(p string, _ os.FileInfo) error {
-        exp, err := xattr.Get(p, checksumKey)
-        if err != nil {
-            if errors.Is(err, xattr.ENOATTR) {
-                bad = true
-                if verbose {
-                    fmt.Printf("%s <none> ERROR\n", p)
-                }
-                if cont {
-                    return nil
-                }
-                return fail
-            }
-            return err
-        }
+	err := walkAndProcess(dir, stats, "Verifying checksums", func(p string, info os.FileInfo, s *Stats) error {
+		exp, err := xattr.Get(p, checksumKey)
+		if err != nil {
+			if errors.Is(err, xattr.ENOATTR) {
+				bad = true
+				atomic.AddInt64(&s.FilesFailed, 1)
+				if verbose && !quiet {
+					fmt.Printf("%s <none> ERROR\n", p)
+				}
+				if cont {
+					return nil
+				}
+				return fail
+			}
+			return err
+		}
 
-        act, err := fileMultihash(p)
-        if err != nil {
-            return err
-        }
-        ok := bytes.Equal(exp, act)
-        if !ok {
-            bad = true
-        }
-        if verbose {
-            status := "OK"
-            if !ok {
-                status = "ERROR"
-            }
-            fmt.Printf("%s %s %s\n", p, act, status)
-        }
-        if !ok && !cont {
-            return fail
-        }
-        return nil
-    })
+		act, err := fileMultihash(p)
+		if err != nil {
+			atomic.AddInt64(&s.FilesFailed, 1)
+			return err
+		}
+		ok := bytes.Equal(exp, act)
+		if !ok {
+			bad = true
+			atomic.AddInt64(&s.FilesFailed, 1)
+		} else {
+			atomic.AddInt64(&s.FilesProcessed, 1)
+			atomic.AddInt64(&s.BytesProcessed, info.Size())
+		}
+		if verbose && !quiet {
+			status := "OK"
+			if !ok {
+				status = "ERROR"
+			}
+			fmt.Printf("%s %s %s\n", p, act, status)
+		}
+		if !ok && !cont {
+			return fail
+		}
+		return nil
+	})
 
-    if err != nil {
-        if errors.Is(err, fail) {
-            return fail
-        }
-        return err
-    }
-    if bad {
-        return fail
-    }
-    return nil
+	if err != nil {
+		if errors.Is(err, fail) {
+			return fail
+		}
+		return err
+	}
+	if bad {
+		return fail
+	}
+	return nil
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // Helpers
 ///////////////////////////////////////////////////////////////////////////////
 
-func walkAndProcess(root string, fn func(string, os.FileInfo) error) error {
-    root = filepath.Clean(root)
-    return filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
-        if err != nil {
-            return err
-        }
+// countFiles counts the total number of regular files that will be processed
+func countFiles(root string) int64 {
+	var count int64
+	root = filepath.Clean(root)
+	filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, _ := filepath.Rel(root, p)
+		if shouldExclude(rel, info) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if info.IsDir() {
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		count++
+		return nil
+	})
+	return count
+}
 
-        // skip symlinks entirely
-        if info.Mode()&os.ModeSymlink != 0 {
-            if verbose {
-                log.Printf("skip symlink %s", p)
-            }
-            if info.IsDir() {
-                return filepath.SkipDir
-            }
-            return nil
-        }
+func walkAndProcess(root string, stats *Stats, description string, fn func(string, os.FileInfo, *Stats) error) error {
+	root = filepath.Clean(root)
 
-        rel, _ := filepath.Rel(root, p)
-        if shouldExclude(rel, info) {
-            if info.IsDir() {
-                return filepath.SkipDir
-            }
-            return nil
-        }
+	// Count files first for progress bar
+	total := countFiles(root)
 
-        if info.IsDir() {
-            return nil
-        }
-        if !info.Mode().IsRegular() {
-            if verbose {
-                log.Printf("skip non-regular %s", p)
-            }
-            return nil
-        }
-        return fn(p, info)
-    })
+	// Create progress bar
+	var bar *progressbar.ProgressBar
+	if !quiet {
+		bar = progressbar.NewOptions64(total,
+			progressbar.OptionSetDescription(description),
+			progressbar.OptionSetWriter(os.Stderr),
+			progressbar.OptionShowCount(),
+			progressbar.OptionShowIts(),
+			progressbar.OptionSetItsString("files"),
+			progressbar.OptionThrottle(250*time.Millisecond),
+			progressbar.OptionShowElapsedTimeOnFinish(),
+			progressbar.OptionSetPredictTime(true),
+			progressbar.OptionFullWidth(),
+			progressbar.OptionSetTheme(progressbar.Theme{
+				Saucer:        "=",
+				SaucerHead:    ">",
+				SaucerPadding: " ",
+				BarStart:      "[",
+				BarEnd:        "]",
+			}),
+		)
+	}
+
+	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// skip symlinks entirely
+		if info.Mode()&os.ModeSymlink != 0 {
+			if verbose && !quiet {
+				log.Printf("skip symlink %s", p)
+			}
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		rel, _ := filepath.Rel(root, p)
+		if shouldExclude(rel, info) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		if info.IsDir() {
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			if verbose && !quiet {
+				log.Printf("skip non-regular %s", p)
+			}
+			return nil
+		}
+
+		fnErr := fn(p, info, stats)
+		if bar != nil {
+			bar.Add(1)
+		}
+		return fnErr
+	})
+
+	if bar != nil {
+		bar.Finish()
+	}
+
+	return err
 }
 
 func shouldExclude(rel string, info os.FileInfo) bool {
-    if rel == "." || rel == "" {
-        return false
-    }
-    if excludeDotfiles {
-        for _, part := range strings.Split(rel, string(os.PathSeparator)) {
-            if strings.HasPrefix(part, ".") {
-                return true
-            }
-        }
-    }
-    for _, pat := range excludePatterns {
-        if ok, _ := doublestar.PathMatch(pat, rel); ok {
-            return true
-        }
-    }
-    return false
+	if rel == "." || rel == "" {
+		return false
+	}
+	if excludeDotfiles {
+		for _, part := range strings.Split(rel, string(os.PathSeparator)) {
+			if strings.HasPrefix(part, ".") {
+				return true
+			}
+		}
+	}
+	for _, pat := range excludePatterns {
+		if ok, _ := doublestar.PathMatch(pat, rel); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func hasXattr(path, key string) bool {
-    _, err := xattr.Get(path, key)
-    return err == nil
+	_, err := xattr.Get(path, key)
+	return err == nil
 }
 
 func fileMultihash(path string) ([]byte, error) {
-    f, err := os.Open(path)
-    if err != nil {
-        return nil, err
-    }
-    defer f.Close()
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
 
-    h := sha256.New()
-    if _, err := io.Copy(h, f); err != nil {
-        return nil, err
-    }
-    mh, err := multihash.Encode(h.Sum(nil), multihash.SHA2_256)
-    if err != nil {
-        return nil, err
-    }
-    return []byte(base58.Encode(mh)), nil
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return nil, err
+	}
+	mh, err := multihash.Encode(h.Sum(nil), multihash.SHA2_256)
+	if err != nil {
+		return nil, err
+	}
+	return []byte(base58.Encode(mh)), nil
 }

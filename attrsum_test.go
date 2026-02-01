@@ -30,13 +30,17 @@ func writeFile(t *testing.T, root, name, content string) string {
 	return p
 }
 
+func newTestStats() *Stats {
+	return &Stats{StartTime: time.Now()}
+}
+
 func TestSumAddAndUpdate(t *testing.T) {
 	dir := t.TempDir()
 	skipIfNoXattr(t, dir)
 
 	f := writeFile(t, dir, "a.txt", "hello")
 
-	if err := ProcessSumAdd(dir); err != nil {
+	if err := ProcessSumAdd(dir, newTestStats()); err != nil {
 		t.Fatalf("add: %v", err)
 	}
 	if _, err := xattr.Get(f, checksumKey); err != nil {
@@ -49,7 +53,7 @@ func TestSumAddAndUpdate(t *testing.T) {
 	now := time.Now().Add(2 * time.Second)
 	os.Chtimes(f, now, now)
 
-	if err := ProcessSumUpdate(dir); err != nil {
+	if err := ProcessSumUpdate(dir, newTestStats()); err != nil {
 		t.Fatalf("update: %v", err)
 	}
 	tsb2, _ := xattr.Get(f, sumTimeKey)
@@ -64,17 +68,17 @@ func TestProcessCheckIntegration(t *testing.T) {
 	skipIfNoXattr(t, dir)
 
 	writeFile(t, dir, "b.txt", "world")
-	if err := ProcessSumAdd(dir); err != nil {
+	if err := ProcessSumAdd(dir, newTestStats()); err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	if err := ProcessCheck(dir, false); err != nil {
+	if err := ProcessCheck(dir, false, newTestStats()); err != nil {
 		t.Fatalf("check ok: %v", err)
 	}
 
 	f := filepath.Join(dir, "b.txt")
 	os.WriteFile(f, []byte("corrupt"), 0o644)
 
-	if err := ProcessCheck(dir, false); err == nil {
+	if err := ProcessCheck(dir, false, newTestStats()); err == nil {
 		t.Fatalf("expected mismatch error, got nil")
 	}
 }
@@ -84,11 +88,11 @@ func TestClearRemovesAttrs(t *testing.T) {
 	skipIfNoXattr(t, dir)
 
 	f := writeFile(t, dir, "c.txt", "data")
-	if err := ProcessSumAdd(dir); err != nil {
+	if err := ProcessSumAdd(dir, newTestStats()); err != nil {
 		t.Fatalf("add: %v", err)
 	}
 
-	if err := ProcessClear(dir); err != nil {
+	if err := ProcessClear(dir, newTestStats()); err != nil {
 		t.Fatalf("clear: %v", err)
 	}
 	if _, err := xattr.Get(f, checksumKey); err == nil {
@@ -113,7 +117,7 @@ func TestExcludeDotfilesAndPatterns(t *testing.T) {
 	excludePatterns = []string{"*.me"}
 	defer func() { excludeDotfiles, excludePatterns = oldDot, oldPat }()
 
-	if err := ProcessSumAdd(dir); err != nil {
+	if err := ProcessSumAdd(dir, newTestStats()); err != nil {
 		t.Fatalf("add with excludes: %v", err)
 	}
 
@@ -139,7 +143,7 @@ func TestSkipBrokenSymlink(t *testing.T) {
 	}
 
 	// Should not error and should not create xattrs on link
-	if err := ProcessSumAdd(dir); err != nil {
+	if err := ProcessSumAdd(dir, newTestStats()); err != nil {
 		t.Fatalf("ProcessSumAdd with symlink: %v", err)
 	}
 	if _, err := xattr.Get(link, checksumKey); err == nil {
@@ -155,13 +159,13 @@ func TestPermissionErrors(t *testing.T) {
 	os.Chmod(secret, 0o000)
 	defer os.Chmod(secret, 0o644)
 
-	if err := ProcessSumAdd(dir); err == nil {
+	if err := ProcessSumAdd(dir, newTestStats()); err == nil {
 		t.Fatalf("expected permission error, got nil")
 	}
-	if err := ProcessSumUpdate(dir); err == nil {
+	if err := ProcessSumUpdate(dir, newTestStats()); err == nil {
 		t.Fatalf("expected permission error on update, got nil")
 	}
-	if err := ProcessCheck(dir, false); err == nil {
+	if err := ProcessCheck(dir, false, newTestStats()); err == nil {
 		t.Fatalf("expected permission error on check, got nil")
 	}
 }

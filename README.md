@@ -45,6 +45,12 @@ attrsum -v check --continue DIR1 DIR2
 
 # remove checksum & timestamp xattrs
 attrsum clear DIR1 DIR2
+
+# read paths from stdin (use - as argument)
+find /data -name "*.jpg" | attrsum sum add -
+
+# quiet mode (suppress progress bar and summary)
+attrsum -q sum add DIR
 ```
 
 | xattr key                                   | meaning                        |
@@ -55,8 +61,11 @@ attrsum clear DIR1 DIR2
 Flags:
 
 * `-v, --verbose` — per-file log output
+* `-q, --quiet` — suppress all output except errors (no progress bar or summary)
 * `--exclude PATTERN` — skip paths matching rsync/Doublestar glob
 * `--exclude-dotfiles` — skip any path component that starts with `.`
+
+All commands display a progress bar with ETA and print a summary report to stderr on completion (unless `--quiet` is specified).
 
 `attrsum` **never follows symlinks** and skips non-regular files (sockets, devices, …).
 
@@ -75,13 +84,9 @@ required.  Now you can trust a USB stick didn't eat your data.
 
 Future improvements under consideration:
 
-- **Quiet mode (`-q`)** — suppress all output except errors
 - **Dry-run mode (`--dry-run`, `-n`)** — show what would be done without making changes
 - **JSON output (`--json`)** — machine-readable output for scripting and integration
 - **Parallel processing (`-j N`)** — use multiple goroutines for faster checksumming on large trees
-- **Progress indicator** — show progress bar or spinner for long-running operations
-- **Summary report** — print statistics on completion (files processed, errors, bytes hashed)
-- **Read paths from stdin (`-`)** — support piping file lists, e.g. `find ... | attrsum sum add -`
 - **Exit code documentation** — formalize and document exit codes for scripting
 
 ---
