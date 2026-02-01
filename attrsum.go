@@ -62,17 +62,31 @@ func newSumCmd() *cobra.Command {
     }
 
     add := &cobra.Command{
-        Use:   "add <dir>",
+        Use:   "add <path>...",
         Short: "Write checksums for files missing them",
-        Args:  cobra.ExactArgs(1),
-        RunE: func(_ *cobra.Command, a []string) error { return ProcessSumAdd(a[0]) },
+        Args:  cobra.MinimumNArgs(1),
+        RunE: func(_ *cobra.Command, a []string) error {
+            for _, p := range a {
+                if err := ProcessSumAdd(p); err != nil {
+                    return err
+                }
+            }
+            return nil
+        },
     }
 
     upd := &cobra.Command{
-        Use:   "update <dir>",
+        Use:   "update <path>...",
         Short: "Recalculate checksum when file newer than stored sumtime",
-        Args:  cobra.ExactArgs(1),
-        RunE: func(_ *cobra.Command, a []string) error { return ProcessSumUpdate(a[0]) },
+        Args:  cobra.MinimumNArgs(1),
+        RunE: func(_ *cobra.Command, a []string) error {
+            for _, p := range a {
+                if err := ProcessSumUpdate(p); err != nil {
+                    return err
+                }
+            }
+            return nil
+        },
     }
 
     cmd.AddCommand(add, upd)
@@ -129,10 +143,17 @@ func readSumTime(path string) (time.Time, error) {
 
 func newClearCmd() *cobra.Command {
     return &cobra.Command{
-        Use:   "clear <dir>",
+        Use:   "clear <path>...",
         Short: "Remove checksum xattrs from tree",
-        Args:  cobra.ExactArgs(1),
-        RunE: func(_ *cobra.Command, a []string) error { return ProcessClear(a[0]) },
+        Args:  cobra.MinimumNArgs(1),
+        RunE: func(_ *cobra.Command, a []string) error {
+            for _, p := range a {
+                if err := ProcessClear(p); err != nil {
+                    return err
+                }
+            }
+            return nil
+        },
     }
 }
 
@@ -164,10 +185,17 @@ func ProcessClear(dir string) error {
 func newCheckCmd() *cobra.Command {
     var cont bool
     cmd := &cobra.Command{
-        Use:   "check <dir>",
+        Use:   "check <path>...",
         Short: "Verify stored checksums",
-        Args:  cobra.ExactArgs(1),
-        RunE: func(_ *cobra.Command, a []string) error { return ProcessCheck(a[0], cont) },
+        Args:  cobra.MinimumNArgs(1),
+        RunE: func(_ *cobra.Command, a []string) error {
+            for _, p := range a {
+                if err := ProcessCheck(p, cont); err != nil {
+                    return err
+                }
+            }
+            return nil
+        },
     }
     cmd.Flags().BoolVar(&cont, "continue", false, "continue after errors and report each file")
     return cmd
