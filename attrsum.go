@@ -238,10 +238,23 @@ func ProcessSumUpdate(dir string, stats *Stats, bar *progressbar.ProgressBar) er
 }
 
 func writeChecksumAndTime(path string, info os.FileInfo, stats *Stats) error {
+	// Record mtime before hashing to detect modifications during hash
+	mtimeBefore := info.ModTime()
+
 	hash, err := fileMultihash(path)
 	if err != nil {
 		return err
 	}
+
+	// Check if file was modified during hashing
+	infoAfter, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("stat after hash: %w", err)
+	}
+	if !infoAfter.ModTime().Equal(mtimeBefore) {
+		return fmt.Errorf("%s: file modified during checksum calculation", path)
+	}
+
 	if err := xattr.Set(path, checksumKey, hash); err != nil {
 		return fmt.Errorf("set checksum attr: %w", err)
 	}
@@ -249,7 +262,9 @@ func writeChecksumAndTime(path string, info os.FileInfo, stats *Stats) error {
 		fmt.Printf("%s %s written\n", path, hash)
 	}
 
-	ts := time.Now().UTC().Format(time.RFC3339Nano)
+	// Store the file's mtime as sumtime (not wall-clock time)
+	// This makes update comparisons semantically correct
+	ts := mtimeBefore.UTC().Format(time.RFC3339Nano)
 	if err := xattr.Set(path, sumTimeKey, []byte(ts)); err != nil {
 		return fmt.Errorf("set sumtime attr: %w", err)
 	}
@@ -258,7 +273,7 @@ func writeChecksumAndTime(path string, info os.FileInfo, stats *Stats) error {
 	}
 
 	atomic.AddInt64(&stats.FilesProcessed, 1)
-	atomic.AddInt64(&stats.BytesProcessed, info.Size())
+	atomic.AddInt64(&stats.BytesProcessed, infoAfter.Size())
 	return nil
 }
 
