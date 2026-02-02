@@ -241,7 +241,7 @@ func writeChecksumAndTime(path string, info os.FileInfo, stats *Stats) error {
 	// Record mtime before hashing to detect modifications during hash
 	mtimeBefore := info.ModTime()
 
-	hash, err := fileMultihash(path)
+	hash, bytesRead, err := fileMultihash(path)
 	if err != nil {
 		return err
 	}
@@ -273,7 +273,7 @@ func writeChecksumAndTime(path string, info os.FileInfo, stats *Stats) error {
 	}
 
 	atomic.AddInt64(&stats.FilesProcessed, 1)
-	atomic.AddInt64(&stats.BytesProcessed, infoAfter.Size())
+	atomic.AddInt64(&stats.BytesProcessed, bytesRead)
 	return nil
 }
 
@@ -426,7 +426,7 @@ func ProcessCheck(dir string, cont bool, stats *Stats, bar *progressbar.Progress
 			return err
 		}
 
-		act, err := fileMultihash(p)
+		act, bytesRead, err := fileMultihash(p)
 		if err != nil {
 			atomic.AddInt64(&s.FilesFailed, 1)
 			return err
@@ -436,7 +436,7 @@ func ProcessCheck(dir string, cont bool, stats *Stats, bar *progressbar.Progress
 			atomic.AddInt64(&s.FilesFailed, 1)
 		} else {
 			atomic.AddInt64(&s.FilesProcessed, 1)
-			atomic.AddInt64(&s.BytesProcessed, info.Size())
+			atomic.AddInt64(&s.BytesProcessed, bytesRead)
 		}
 		if verbose && !quiet {
 			status := "OK"
@@ -604,20 +604,21 @@ func hasXattr(path, key string) bool {
 	return err == nil
 }
 
-func fileMultihash(path string) ([]byte, error) {
+func fileMultihash(path string) (hash []byte, bytesRead int64, err error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer f.Close()
 
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return nil, err
+	bytesRead, err = io.Copy(h, f)
+	if err != nil {
+		return nil, bytesRead, err
 	}
 	mh, err := multihash.Encode(h.Sum(nil), multihash.SHA2_256)
 	if err != nil {
-		return nil, err
+		return nil, bytesRead, err
 	}
-	return []byte(base58.Encode(mh)), nil
+	return []byte(base58.Encode(mh)), bytesRead, nil
 }
