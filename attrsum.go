@@ -148,7 +148,11 @@ func newSumCmd() *cobra.Command {
 			stats := &Stats{StartTime: time.Now()}
 			var bar *progressbar.ProgressBar
 			if !quiet {
-				bar = newProgressBar(countFilesMultiple(paths), "Adding checksums")
+				total, err := countFilesMultiple(paths)
+				if err != nil {
+					return err
+				}
+				bar = newProgressBar(total, "Adding checksums")
 			}
 			for _, p := range paths {
 				if err := ProcessSumAdd(p, stats, bar); err != nil {
@@ -178,7 +182,11 @@ func newSumCmd() *cobra.Command {
 			stats := &Stats{StartTime: time.Now()}
 			var bar *progressbar.ProgressBar
 			if !quiet {
-				bar = newProgressBar(countFilesMultiple(paths), "Updating checksums")
+				total, err := countFilesMultiple(paths)
+				if err != nil {
+					return err
+				}
+				bar = newProgressBar(total, "Updating checksums")
 			}
 			for _, p := range paths {
 				if err := ProcessSumUpdate(p, stats, bar); err != nil {
@@ -279,7 +287,11 @@ func newClearCmd() *cobra.Command {
 			stats := &Stats{StartTime: time.Now()}
 			var bar *progressbar.ProgressBar
 			if !quiet {
-				bar = newProgressBar(countFilesMultiple(paths), "Clearing checksums")
+				total, err := countFilesMultiple(paths)
+				if err != nil {
+					return err
+				}
+				bar = newProgressBar(total, "Clearing checksums")
 			}
 			for _, p := range paths {
 				if err := ProcessClear(p, stats, bar); err != nil {
@@ -347,7 +359,11 @@ func newCheckCmd() *cobra.Command {
 			stats := &Stats{StartTime: time.Now()}
 			var bar *progressbar.ProgressBar
 			if !quiet {
-				bar = newProgressBar(countFilesMultiple(paths), "Verifying checksums")
+				total, err := countFilesMultiple(paths)
+				if err != nil {
+					return err
+				}
+				bar = newProgressBar(total, "Verifying checksums")
 			}
 			var finalErr error
 			for _, p := range paths {
@@ -438,12 +454,12 @@ func ProcessCheck(dir string, cont bool, stats *Stats, bar *progressbar.Progress
 ///////////////////////////////////////////////////////////////////////////////
 
 // countFiles counts the total number of regular files that will be processed
-func countFiles(root string) int64 {
+func countFiles(root string) (int64, error) {
 	var count int64
 	root = filepath.Clean(root)
-	filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
-			return nil
+			return err
 		}
 		// Skip symlinks - note: filepath.Walk uses Lstat, so symlinks are
 		// reported as ModeSymlink, never as directories. Walk doesn't follow them.
@@ -466,16 +482,20 @@ func countFiles(root string) int64 {
 		count++
 		return nil
 	})
-	return count
+	return count, err
 }
 
 // countFilesMultiple counts files across multiple roots
-func countFilesMultiple(roots []string) int64 {
+func countFilesMultiple(roots []string) (int64, error) {
 	var total int64
 	for _, root := range roots {
-		total += countFiles(root)
+		count, err := countFiles(root)
+		if err != nil {
+			return total, err
+		}
+		total += count
 	}
-	return total
+	return total, nil
 }
 
 // newProgressBar creates a new progress bar with standard options
