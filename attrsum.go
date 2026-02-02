@@ -146,10 +146,20 @@ func newSumCmd() *cobra.Command {
 				return err
 			}
 			stats := &Stats{StartTime: time.Now()}
+			var bar *progressbar.ProgressBar
+			if !quiet {
+				bar = newProgressBar(countFilesMultiple(paths), "Adding checksums")
+			}
 			for _, p := range paths {
-				if err := ProcessSumAdd(p, stats); err != nil {
+				if err := ProcessSumAdd(p, stats, bar); err != nil {
+					if bar != nil {
+						bar.Finish()
+					}
 					return err
 				}
+			}
+			if bar != nil {
+				bar.Finish()
 			}
 			stats.Print("sum add")
 			return nil
@@ -166,10 +176,20 @@ func newSumCmd() *cobra.Command {
 				return err
 			}
 			stats := &Stats{StartTime: time.Now()}
+			var bar *progressbar.ProgressBar
+			if !quiet {
+				bar = newProgressBar(countFilesMultiple(paths), "Updating checksums")
+			}
 			for _, p := range paths {
-				if err := ProcessSumUpdate(p, stats); err != nil {
+				if err := ProcessSumUpdate(p, stats, bar); err != nil {
+					if bar != nil {
+						bar.Finish()
+					}
 					return err
 				}
+			}
+			if bar != nil {
+				bar.Finish()
 			}
 			stats.Print("sum update")
 			return nil
@@ -180,8 +200,8 @@ func newSumCmd() *cobra.Command {
 	return cmd
 }
 
-func ProcessSumAdd(dir string, stats *Stats) error {
-	return walkAndProcess(dir, stats, "Adding checksums", func(p string, info os.FileInfo, s *Stats) error {
+func ProcessSumAdd(dir string, stats *Stats, bar *progressbar.ProgressBar) error {
+	return walkAndProcess(dir, stats, bar, func(p string, info os.FileInfo, s *Stats) error {
 		if hasXattr(p, checksumKey) {
 			atomic.AddInt64(&s.FilesSkipped, 1)
 			return nil
@@ -194,8 +214,8 @@ func ProcessSumAdd(dir string, stats *Stats) error {
 	})
 }
 
-func ProcessSumUpdate(dir string, stats *Stats) error {
-	return walkAndProcess(dir, stats, "Updating checksums", func(p string, info os.FileInfo, s *Stats) error {
+func ProcessSumUpdate(dir string, stats *Stats, bar *progressbar.ProgressBar) error {
+	return walkAndProcess(dir, stats, bar, func(p string, info os.FileInfo, s *Stats) error {
 		t, err := readSumTime(p)
 		if err != nil || info.ModTime().After(t) {
 			if err := writeChecksumAndTime(p, info, s); err != nil {
@@ -257,10 +277,20 @@ func newClearCmd() *cobra.Command {
 				return err
 			}
 			stats := &Stats{StartTime: time.Now()}
+			var bar *progressbar.ProgressBar
+			if !quiet {
+				bar = newProgressBar(countFilesMultiple(paths), "Clearing checksums")
+			}
 			for _, p := range paths {
-				if err := ProcessClear(p, stats); err != nil {
+				if err := ProcessClear(p, stats, bar); err != nil {
+					if bar != nil {
+						bar.Finish()
+					}
 					return err
 				}
+			}
+			if bar != nil {
+				bar.Finish()
 			}
 			stats.Print("clear")
 			return nil
@@ -268,8 +298,8 @@ func newClearCmd() *cobra.Command {
 	}
 }
 
-func ProcessClear(dir string, stats *Stats) error {
-	return walkAndProcess(dir, stats, "Clearing checksums", func(p string, info os.FileInfo, s *Stats) error {
+func ProcessClear(dir string, stats *Stats, bar *progressbar.ProgressBar) error {
+	return walkAndProcess(dir, stats, bar, func(p string, info os.FileInfo, s *Stats) error {
 		cleared := false
 		for _, k := range []string{checksumKey, sumTimeKey} {
 			v, err := xattr.Get(p, k)
@@ -315,16 +345,26 @@ func newCheckCmd() *cobra.Command {
 				return err
 			}
 			stats := &Stats{StartTime: time.Now()}
+			var bar *progressbar.ProgressBar
+			if !quiet {
+				bar = newProgressBar(countFilesMultiple(paths), "Verifying checksums")
+			}
 			var finalErr error
 			for _, p := range paths {
-				if err := ProcessCheck(p, cont, stats); err != nil {
+				if err := ProcessCheck(p, cont, stats, bar); err != nil {
 					if cont {
 						finalErr = err
 					} else {
+						if bar != nil {
+							bar.Finish()
+						}
 						stats.Print("check")
 						return err
 					}
 				}
+			}
+			if bar != nil {
+				bar.Finish()
 			}
 			stats.Print("check")
 			return finalErr
@@ -334,11 +374,11 @@ func newCheckCmd() *cobra.Command {
 	return cmd
 }
 
-func ProcessCheck(dir string, cont bool, stats *Stats) error {
+func ProcessCheck(dir string, cont bool, stats *Stats, bar *progressbar.ProgressBar) error {
 	fail := errors.New("verification failed")
 	bad := false
 
-	err := walkAndProcess(dir, stats, "Verifying checksums", func(p string, info os.FileInfo, s *Stats) error {
+	err := walkAndProcess(dir, stats, bar, func(p string, info os.FileInfo, s *Stats) error {
 		exp, err := xattr.Get(p, checksumKey)
 		if err != nil {
 			if errors.Is(err, xattr.ENOATTR) {
@@ -429,34 +469,39 @@ func countFiles(root string) int64 {
 	return count
 }
 
-func walkAndProcess(root string, stats *Stats, description string, fn func(string, os.FileInfo, *Stats) error) error {
-	root = filepath.Clean(root)
-
-	// Count files first for progress bar
-	total := countFiles(root)
-
-	// Create progress bar
-	var bar *progressbar.ProgressBar
-	if !quiet {
-		bar = progressbar.NewOptions64(total,
-			progressbar.OptionSetDescription(description),
-			progressbar.OptionSetWriter(os.Stderr),
-			progressbar.OptionShowCount(),
-			progressbar.OptionShowIts(),
-			progressbar.OptionSetItsString("files"),
-			progressbar.OptionThrottle(250*time.Millisecond),
-			progressbar.OptionShowElapsedTimeOnFinish(),
-			progressbar.OptionSetPredictTime(true),
-			progressbar.OptionFullWidth(),
-			progressbar.OptionSetTheme(progressbar.Theme{
-				Saucer:        "=",
-				SaucerHead:    ">",
-				SaucerPadding: " ",
-				BarStart:      "[",
-				BarEnd:        "]",
-			}),
-		)
+// countFilesMultiple counts files across multiple roots
+func countFilesMultiple(roots []string) int64 {
+	var total int64
+	for _, root := range roots {
+		total += countFiles(root)
 	}
+	return total
+}
+
+// newProgressBar creates a new progress bar with standard options
+func newProgressBar(total int64, description string) *progressbar.ProgressBar {
+	return progressbar.NewOptions64(total,
+		progressbar.OptionSetDescription(description),
+		progressbar.OptionSetWriter(os.Stderr),
+		progressbar.OptionShowCount(),
+		progressbar.OptionShowIts(),
+		progressbar.OptionSetItsString("files"),
+		progressbar.OptionThrottle(250*time.Millisecond),
+		progressbar.OptionShowElapsedTimeOnFinish(),
+		progressbar.OptionSetPredictTime(true),
+		progressbar.OptionFullWidth(),
+		progressbar.OptionSetTheme(progressbar.Theme{
+			Saucer:        "=",
+			SaucerHead:    ">",
+			SaucerPadding: " ",
+			BarStart:      "[",
+			BarEnd:        "]",
+		}),
+	)
+}
+
+func walkAndProcess(root string, stats *Stats, bar *progressbar.ProgressBar, fn func(string, os.FileInfo, *Stats) error) error {
+	root = filepath.Clean(root)
 
 	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -496,10 +541,6 @@ func walkAndProcess(root string, stats *Stats, description string, fn func(strin
 		}
 		return fnErr
 	})
-
-	if bar != nil {
-		bar.Finish()
-	}
 
 	return err
 }
