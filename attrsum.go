@@ -407,13 +407,13 @@ func newCheckCmd() *cobra.Command {
 
 func ProcessCheck(dir string, cont bool, stats *Stats, bar *progressbar.ProgressBar) error {
 	fail := errors.New("verification failed")
-	bad := false
+	// Track initial failed count to detect failures during this walk
+	initialFailed := atomic.LoadInt64(&stats.FilesFailed)
 
 	err := walkAndProcess(dir, stats, bar, func(p string, info os.FileInfo, s *Stats) error {
 		exp, err := xattr.Get(p, checksumKey)
 		if err != nil {
 			if errors.Is(err, xattr.ENOATTR) {
-				bad = true
 				atomic.AddInt64(&s.FilesFailed, 1)
 				if verbose && !quiet {
 					fmt.Printf("%s <none> ERROR\n", p)
@@ -433,7 +433,6 @@ func ProcessCheck(dir string, cont bool, stats *Stats, bar *progressbar.Progress
 		}
 		ok := bytes.Equal(exp, act)
 		if !ok {
-			bad = true
 			atomic.AddInt64(&s.FilesFailed, 1)
 		} else {
 			atomic.AddInt64(&s.FilesProcessed, 1)
@@ -458,7 +457,8 @@ func ProcessCheck(dir string, cont bool, stats *Stats, bar *progressbar.Progress
 		}
 		return err
 	}
-	if bad {
+	// Check if any failures occurred during this walk
+	if atomic.LoadInt64(&stats.FilesFailed) > initialFailed {
 		return fail
 	}
 	return nil
