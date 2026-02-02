@@ -99,8 +99,10 @@ func main() {
 // expandPaths expands the given paths, reading from stdin if "-" is present
 func expandPaths(args []string) ([]string, error) {
 	var paths []string
+	readFromStdin := false
 	for _, arg := range args {
 		if arg == "-" {
+			readFromStdin = true
 			scanner := bufio.NewScanner(os.Stdin)
 			for scanner.Scan() {
 				line := strings.TrimSpace(scanner.Text())
@@ -114,6 +116,12 @@ func expandPaths(args []string) ([]string, error) {
 		} else {
 			paths = append(paths, arg)
 		}
+	}
+	if len(paths) == 0 {
+		if readFromStdin {
+			return nil, errors.New("no paths provided on stdin")
+		}
+		return nil, errors.New("no paths provided")
 	}
 	return paths, nil
 }
