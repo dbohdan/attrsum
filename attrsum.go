@@ -397,10 +397,9 @@ func countFiles(root string) int64 {
 		if err != nil {
 			return nil
 		}
+		// Skip symlinks - note: filepath.Walk uses Lstat, so symlinks are
+		// reported as ModeSymlink, never as directories. Walk doesn't follow them.
 		if info.Mode()&os.ModeSymlink != 0 {
-			if info.IsDir() {
-				return filepath.SkipDir
-			}
 			return nil
 		}
 		rel, _ := filepath.Rel(root, p)
@@ -456,13 +455,11 @@ func walkAndProcess(root string, stats *Stats, description string, fn func(strin
 			return err
 		}
 
-		// skip symlinks entirely
+		// Skip symlinks - filepath.Walk uses Lstat, so symlinks are reported
+		// as ModeSymlink, never as directories. Walk doesn't follow them.
 		if info.Mode()&os.ModeSymlink != 0 {
 			if verbose && !quiet {
 				log.Printf("skip symlink %s", p)
-			}
-			if info.IsDir() {
-				return filepath.SkipDir
 			}
 			return nil
 		}
