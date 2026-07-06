@@ -1,3 +1,13 @@
+# Workflow
+
+* branch (from `main`)
+* do the work in Next Step
+* move Next Step to the top of Completed Steps
+* move the top item of Future Steps into Next Step
+* commit (`TODO.md` changes in the same commit as the work)
+* merge to `main` if the branch is not protected, otherwise open a PR
+* push
+
 # Status
 
 1.0+
