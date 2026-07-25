@@ -1,0 +1,21 @@
+#!/bin/sh
+# script/precommit: run by the git pre-commit hook; fails the commit if
+# checks fail. Our own extension to scripts-to-rule-them-all. Go extra:
+# go mod tidy must be a no-op before the checks run.
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+
+main() {
+    cd "$ROOT"
+    go mod tidy
+    if ! git diff --exit-code -- go.mod go.sum; then
+        echo "precommit: go mod tidy changed go.mod/go.sum;" \
+            "stage the changes and retry" >&2
+        exit 1
+    fi
+    "$SCRIPT_DIR/check"
+}
+
+main "$@"

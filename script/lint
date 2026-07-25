@@ -1,0 +1,12 @@
+#!/bin/sh
+# script/lint: run the linter.
+set -eu
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+
+main() {
+    cd "$ROOT"
+    golangci-lint run --config .golangci.yml ./...
+}
+
+main "$@"

@@ -1,0 +1,12 @@
+#!/bin/sh
+# script/test: run the test suite.
+set -eu
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+
+main() {
+    cd "$ROOT"
+    go test -v -race -timeout 30s -cover ./...
+}
+
+main "$@"

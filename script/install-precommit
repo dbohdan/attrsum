@@ -1,0 +1,16 @@
+#!/bin/sh
+# script/install-precommit: install the git pre-commit hook that runs
+# script/precommit. Our own extension to scripts-to-rule-them-all.
+set -eu
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+
+main() {
+    cd "$ROOT"
+    hook=".git/hooks/pre-commit"
+    printf '#!/bin/sh\nset -e\nscript/precommit\n' > "$hook"
+    chmod +x "$hook"
+    echo "pre-commit hook installed: runs script/precommit"
+}
+
+main "$@"

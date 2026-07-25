@@ -1,0 +1,13 @@
+#!/bin/sh
+# script/cibuild: run the CI build. The Dockerfile runs make check, so
+# a successful build implies all checks pass.
+set -eu
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+
+main() {
+    cd "$ROOT"
+    docker build .
+}
+
+main "$@"

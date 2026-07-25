@@ -1,0 +1,13 @@
+#!/bin/sh
+# script/fmt: format all files (writes).
+set -eu
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+
+main() {
+    cd "$ROOT"
+    gofmt -s -w .
+    goimports -w .
+}
+
+main "$@"

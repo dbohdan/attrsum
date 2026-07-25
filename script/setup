@@ -1,0 +1,13 @@
+#!/bin/sh
+# script/setup: set up the repo for development after a fresh clone:
+# installs dependencies and the git pre-commit hook.
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+
+main() {
+    "$SCRIPT_DIR/bootstrap"
+    "$SCRIPT_DIR/install-precommit"
+}
+
+main "$@"

@@ -1,0 +1,14 @@
+#!/bin/sh
+# script/docker: build the Docker image tagged with the project name.
+# Identical in all repos; the tag comes from script/projectname.
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+
+main() {
+    cd "$ROOT"
+    docker build -t "$("$SCRIPT_DIR/projectname")" .
+}
+
+main "$@"

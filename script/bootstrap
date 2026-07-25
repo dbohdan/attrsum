@@ -1,0 +1,82 @@
+#!/bin/sh
+# script/bootstrap: install all dependencies needed to build and develop
+# this repo. Idempotent: every install is guarded by a check so already
+# installed tools are skipped. Base tooling comes from nix, apt, brew,
+# or apk (detected in that order); assumes nothing is present.
+# golangci-lint and goimports are installed via `go install` at the same
+# pinned commits the Dockerfile uses (never "latest").
+set -eu
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+
+# Pinned versions, 2026-07-07 (same pins as the Dockerfile)
+# golangci-lint v2.10.1
+GOLANGCI_LINT_REF="github.com/golangci/golangci-lint/v2/cmd/golangci-lint@5d1e709b7be35cb2025444e19de266b056b7b7ee"
+# goimports v0.42.0
+GOIMPORTS_REF="golang.org/x/tools/cmd/goimports@009367f5c17a8d4c45a961a3a509277190a9a6f0"
+
+PKGMGR=""
+SUDO=""
+APT_UPDATED=""
+
+detect_pkgmgr() {
+    [ -n "$PKGMGR" ] && return 0
+    if command -v nix-env >/dev/null 2>&1; then
+        PKGMGR="nix"
+    elif command -v apt-get >/dev/null 2>&1; then
+        PKGMGR="apt"
+    elif command -v brew >/dev/null 2>&1; then
+        PKGMGR="brew"
+    elif command -v apk >/dev/null 2>&1; then
+        PKGMGR="apk"
+    else
+        echo "bootstrap: no supported package manager (nix, apt, brew, apk)" >&2
+        exit 1
+    fi
+    if [ "$PKGMGR" = "apt" ]; then
+        export DEBIAN_FRONTEND=noninteractive
+        if [ "$(id -u)" != "0" ]; then
+            SUDO="sudo"
+        fi
+    fi
+}
+
+# pkg_install <nix-attr> <apt-pkg> <brew-formula> <apk-pkg>
+pkg_install() {
+    detect_pkgmgr
+    case "$PKGMGR" in
+        nix) nix-env -iA "nixpkgs.$1" ;;
+        apt)
+            if [ -z "$APT_UPDATED" ]; then
+                $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update
+                APT_UPDATED=1
+            fi
+            $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y "$2"
+            ;;
+        brew) brew install "$3" ;;
+        apk) apk add --no-cache "$4" ;;
+    esac
+}
+
+missing() {
+    ! command -v "$1" >/dev/null 2>&1
+}
+
+main() {
+    cd "$ROOT"
+
+    if missing git; then pkg_install git git git git; fi
+    if missing make; then pkg_install gnumake make make make; fi
+    if missing go; then pkg_install go golang go go; fi
+
+    # Lint/format tools, pinned via go install (installs into
+    # "$(go env GOPATH)/bin"; ensure that is on your PATH).
+    if missing golangci-lint; then go install "$GOLANGCI_LINT_REF"; fi
+    if missing goimports; then go install "$GOIMPORTS_REF"; fi
+
+    go mod download
+
+    echo "bootstrap complete"
+}
+
+main "$@"

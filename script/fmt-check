@@ -1,0 +1,18 @@
+#!/bin/sh
+# script/fmt-check: check formatting (read-only). Same scope as
+# script/fmt, but fails instead of writing.
+set -eu
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+
+main() {
+    cd "$ROOT"
+    files="$(gofmt -l .)"
+    if [ -n "$files" ]; then
+        echo "gofmt: files not formatted:" >&2
+        echo "$files" >&2
+        exit 1
+    fi
+}
+
+main "$@"

@@ -1,0 +1,32 @@
+version: "2"
+
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+
+linters:
+  default: all
+  disable:
+    # Genuinely incompatible with project patterns
+    - exhaustruct      # Requires all struct fields
+    - depguard         # Dependency allow/block lists
+    - godot            # Requires comments to end with periods
+    - wsl              # Deprecated, replaced by wsl_v5
+    - wrapcheck        # Too verbose for internal packages
+    - varnamelen       # Short names like db, id are idiomatic Go
+
+linters-settings:
+  lll:
+    line-length: 88
+  funlen:
+    lines: 80
+    statements: 50
+  cyclop:
+    max-complexity: 15
+  dupl:
+    threshold: 100
+
+issues:
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0

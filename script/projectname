@@ -1,0 +1,12 @@
+#!/bin/sh
+# script/projectname: output the name of this project. Our own
+# extension to scripts-to-rule-them-all. Other scripts that need the
+# name (e.g. script/docker) call this, so they can stay identical
+# across all repos.
+set -eu
+
+main() {
+    echo "attrsum"
+}
+
+main "$@"

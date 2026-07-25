@@ -1,0 +1,14 @@
+#!/bin/sh
+# script/check: run all checks (test, lint, fmt-check). Our own
+# extension to scripts-to-rule-them-all. Must not modify any files.
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+
+main() {
+    "$SCRIPT_DIR/test"
+    "$SCRIPT_DIR/lint"
+    "$SCRIPT_DIR/fmt-check"
+}
+
+main "$@"
