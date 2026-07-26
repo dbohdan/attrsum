@@ -15,10 +15,20 @@ RUN go mod download
 
 COPY . .
 
+# Run the checks as an unprivileged user. Root bypasses file mode bits, which
+# would make the permission tests (expecting EACCES on a 0000 file) spuriously
+# pass with no error. Caches live under /tmp (world-writable) so the user needs
+# no home directory of its own.
+ENV GOCACHE=/tmp/gocache
+ENV XDG_CACHE_HOME=/tmp/xdgcache
+RUN adduser -D -u 1000 builder && chown -R builder:builder /src /go
+USER builder
+
 # Run all checks - build fails if any check fails
 RUN make check
 
-# Build the binary
+# Build the binary (still as the unprivileged user: it owns /src, so git VCS
+# stamping sees consistent ownership).
 RUN make build
 
 # Runtime stage

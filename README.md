@@ -55,8 +55,8 @@ attrsum -q sum add DIR
 
 | xattr key                                   | meaning                        |
 |---------------------------------------------|--------------------------------|
-| `berlin.sneak.app.attrsum.checksum`         | base-58 multihash (sha2-256)   |
-| `berlin.sneak.app.attrsum.sumtime`          | RFC 3339 timestamp of checksum |
+| `user.berlin.sneak.app.attrsum.checksum`    | base-58 multihash (sha2-256)   |
+| `user.berlin.sneak.app.attrsum.sumtime`     | RFC 3339 timestamp of checksum |
 
 Flags:
 
