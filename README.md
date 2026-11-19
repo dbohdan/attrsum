@@ -37,11 +37,13 @@ attrsum sum add DIR1 DIR2 file.txt
 # update checksum only when file mtime is newer than stored sumtime
 attrsum sum update DIR1 DIR2
 
-# verify checksums, stop on first error
+# verify checksums: every mismatch is reported on stderr, files without a
+# checksum are skipped, the scan runs to completion, exit status is
+# non-zero if any file failed
 attrsum check DIR1 DIR2
 
-# verify every file, reporting each result, keep going after errors
-attrsum -v check --continue DIR1 DIR2
+# also print an OK/SKIP line for every file examined
+attrsum -v check DIR1 DIR2
 
 # remove checksum & timestamp xattrs
 attrsum clear DIR1 DIR2

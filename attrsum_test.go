@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -130,7 +131,7 @@ func TestProcessCheckIntegration(t *testing.T) {
 		t.Fatalf("add: %v", err)
 	}
 
-	err = processCheck(opts, dir, false, newTestStats(), nil)
+	err = processCheck(opts, dir, newTestStats(), nil)
 	if err != nil {
 		t.Fatalf("check ok: %v", err)
 	}
@@ -142,9 +143,134 @@ func TestProcessCheckIntegration(t *testing.T) {
 		t.Fatalf("corrupt: %v", err)
 	}
 
-	err = processCheck(opts, dir, false, newTestStats(), nil)
-	if err == nil {
-		t.Fatalf("expected mismatch error, got nil")
+	err = processCheck(opts, dir, newTestStats(), nil)
+	if !errors.Is(err, errVerification) {
+		t.Fatalf("expected verification error, got %v", err)
+	}
+}
+
+// TestCheckSkipsUnchecksummed verifies that a file without a stored checksum
+// is skipped rather than counted as a failure.
+func TestCheckSkipsUnchecksummed(t *testing.T) {
+	t.Parallel()
+
+	opts := &options{}
+	dir := t.TempDir()
+	skipIfNoXattr(t, dir)
+
+	writeFile(t, dir, "summed.txt", "summed")
+
+	err := processSumAdd(opts, dir, newTestStats(), nil)
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	writeFile(t, dir, "fresh.txt", "never summed")
+
+	stats := newTestStats()
+
+	err = processCheck(opts, dir, stats, nil)
+	if err != nil {
+		t.Fatalf("check with unchecksummed file: %v", err)
+	}
+
+	if stats.FilesProcessed != 1 || stats.FilesSkipped != 1 || stats.FilesFailed != 0 {
+		t.Fatalf("stats = processed %d skipped %d failed %d, want 1/1/0",
+			stats.FilesProcessed, stats.FilesSkipped, stats.FilesFailed)
+	}
+
+	err = verificationResult(stats)
+	if err != nil {
+		t.Fatalf("verificationResult with no failures: %v", err)
+	}
+}
+
+// TestCheckContinuesAfterMismatch verifies that a mismatch does not stop the
+// scan: every file is still examined and the failure count drives the
+// final error.
+func TestCheckContinuesAfterMismatch(t *testing.T) {
+	t.Parallel()
+
+	opts := &options{}
+	dir := t.TempDir()
+	skipIfNoXattr(t, dir)
+
+	first := writeFile(t, dir, "a/first.txt", "first")
+	writeFile(t, dir, "b/second.txt", "second")
+	writeFile(t, dir, "c/third.txt", "third")
+
+	err := processSumAdd(opts, dir, newTestStats(), nil)
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	err = os.WriteFile(first, []byte("corrupt"), filePerm)
+	if err != nil {
+		t.Fatalf("corrupt: %v", err)
+	}
+
+	stats := newTestStats()
+
+	err = processCheck(opts, dir, stats, nil)
+	if !errors.Is(err, errVerification) {
+		t.Fatalf("expected verification error, got %v", err)
+	}
+
+	if stats.FilesProcessed != 2 || stats.FilesFailed != 1 {
+		t.Fatalf("stats = processed %d failed %d, want 2/1 (scan did not continue)",
+			stats.FilesProcessed, stats.FilesFailed)
+	}
+
+	err = verificationResult(stats)
+	if !errors.Is(err, errVerification) {
+		t.Fatalf("verificationResult with failures = %v, want errVerification", err)
+	}
+
+	if !strings.Contains(err.Error(), "1 file") {
+		t.Fatalf("verificationResult message %q should carry the failure count", err)
+	}
+}
+
+func TestIsDotfile(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]bool{
+		".":          false,
+		"..":         false,
+		"":           false,
+		"plain":      false,
+		"a.b":        false,
+		".hidden":    true,
+		"..twodots":  true,
+		".DS_Store":  true,
+		".Spotlight": true,
+	}
+
+	for name, want := range cases {
+		if got := isDotfile(name); got != want {
+			t.Errorf("isDotfile(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// TestShouldExcludeDotRoots verifies that the "." and ".." directory
+// references are never treated as dotfiles, so passing them (or paths
+// through them) as roots under --exclude-dotfiles still scans the tree.
+func TestShouldExcludeDotRoots(t *testing.T) {
+	t.Parallel()
+
+	opts := &options{excludeDotfiles: true}
+
+	for _, rel := range []string{".", "..", "", "dir/file.txt", filepath.Join("..", "x")} {
+		if shouldExclude(opts, rel) {
+			t.Errorf("shouldExclude(%q) = true, want false", rel)
+		}
+	}
+
+	for _, rel := range []string{".hidden", filepath.Join("dir", ".hidden"), filepath.Join(".hidden", "x")} {
+		if !shouldExclude(opts, rel) {
+			t.Errorf("shouldExclude(%q) = false, want true", rel)
+		}
 	}
 }
 
@@ -315,7 +441,7 @@ func TestPermissionErrors(t *testing.T) {
 		t.Fatalf("expected permission error on update, got nil")
 	}
 
-	err = processCheck(opts, dir, false, newTestStats(), nil)
+	err = processCheck(opts, dir, newTestStats(), nil)
 	if err == nil {
 		t.Fatalf("expected permission error on check, got nil")
 	}

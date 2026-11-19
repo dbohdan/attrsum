@@ -26,9 +26,6 @@ $(HOME)/Documents/_SYSADMIN/cyberdyne path.
 
 # Completed Steps
 
-* 2026-11-19: bugfix: apply exclusion rules to directories that
-    `filepath.Walk` reports as unreadable, so `--exclude-dotfiles`
-    prunes `.Spotlight-V100` instead of aborting with permission denied
 * 2026-02-02: correctness pass: track actual bytes read instead of
     stale file size, atomic failure tracking in ProcessCheck, detect
     file modification during checksum (TOCTOU), propagate countFiles

@@ -418,22 +418,23 @@ func clearOne(opts *options, p string) (bool, error) {
 ///////////////////////////////////////////////////////////////////////////////
 
 func newCheckCmd(opts *options) *cobra.Command {
-	var cont bool
-
-	cmd := &cobra.Command{
+	return &cobra.Command{
 		Use:   "check <path>... (use - to read paths from stdin)",
 		Short: "Verify stored checksums",
-		Args:  cobra.MinimumNArgs(1),
+		Long: `Verify stored checksums.
+
+Every regular file under the given paths is scanned. Files that carry a
+checksum are rehashed and compared; files without one are skipped. Each
+mismatch or unreadable file is reported on stderr as it is found and the
+scan continues. The exit status is non-zero when any file failed.`,
+		Args: cobra.MinimumNArgs(1),
 		RunE: func(_ *cobra.Command, a []string) error {
-			return runCheck(opts, a, cont)
+			return runCheck(opts, a)
 		},
 	}
-	cmd.Flags().BoolVar(&cont, "continue", false, "continue after errors and report each file")
-
-	return cmd
 }
 
-func runCheck(opts *options, args []string, cont bool) error {
+func runCheck(opts *options, args []string) error {
 	paths, err := expandPaths(args)
 	if err != nil {
 		return err
@@ -450,44 +451,51 @@ func runCheck(opts *options, args []string, cont bool) error {
 		}
 	}
 
-	var finalErr error
-
 	for _, p := range paths {
-		perr := processCheck(opts, p, cont, stats, bar)
-		if perr != nil {
-			if !cont {
-				finishBar(bar)
-				stats.Print(opts, "check")
+		perr := processCheck(opts, p, stats, bar)
+		if perr != nil && !errors.Is(perr, errVerification) {
+			finishBar(bar)
+			stats.Print(opts, "check")
 
-				return perr
-			}
-
-			finalErr = perr
+			return perr
 		}
 	}
 
 	finishBar(bar)
 	stats.Print(opts, "check")
 
-	return finalErr
+	return verificationResult(stats)
 }
 
-func processCheck(opts *options, dir string, cont bool, stats *Stats, bar *progressbar.ProgressBar) error {
-	// Track initial failed count to detect failures during this walk.
+// verificationResult turns the accumulated failure count into the command's
+// final error: nil when every checksummed file verified, otherwise
+// errVerification wrapped with the count so the exit status is non-zero.
+func verificationResult(stats *Stats) error {
+	failed := atomic.LoadInt64(&stats.FilesFailed)
+	if failed == 0 {
+		return nil
+	}
+
+	return fmt.Errorf("%w: %d file(s)", errVerification, failed)
+}
+
+// processCheck verifies every file under dir. Per-file problems (mismatch,
+// missing read permission) are reported and counted but never stop the
+// walk; only structural walk errors abort it. The returned error is
+// errVerification when any file under dir failed.
+func processCheck(opts *options, dir string, stats *Stats, bar *progressbar.ProgressBar) error {
 	initialFailed := atomic.LoadInt64(&stats.FilesFailed)
 
 	err := walkAndProcess(opts, dir, stats, bar, func(p string, _ os.FileInfo, s *Stats) error {
-		return checkOne(opts, p, cont, s)
+		res := checkOne(p, s)
+		reportCheck(opts, bar, p, res)
+
+		return nil
 	})
 	if err != nil {
-		if errors.Is(err, errVerification) {
-			return errVerification
-		}
-
 		return err
 	}
 
-	// Check if any failures occurred during this walk.
 	if atomic.LoadInt64(&stats.FilesFailed) > initialFailed {
 		return errVerification
 	}
@@ -495,69 +503,96 @@ func processCheck(opts *options, dir string, cont bool, stats *Stats, bar *progr
 	return nil
 }
 
-// checkOne verifies the stored checksum of a single path.
-func checkOne(opts *options, p string, cont bool, s *Stats) error {
+// checkStatus classifies the outcome of verifying one file.
+type checkStatus int
+
+const (
+	checkOK checkStatus = iota
+	checkSkipped
+	checkFailed
+)
+
+// checkResult is the outcome of verifying one file. detail is the computed
+// multihash for a verified file, or the reason for a failure.
+type checkResult struct {
+	status checkStatus
+	detail string
+}
+
+// checkOne verifies the stored checksum of a single path and records the
+// outcome in s. It never returns an error: every outcome is a result so the
+// caller can keep scanning.
+func checkOne(p string, s *Stats) checkResult {
 	exp, err := xattr.Get(p, checksumKey)
 	if err != nil {
-		if !errors.Is(err, xattr.ENOATTR) {
-			return err
+		if errors.Is(err, xattr.ENOATTR) {
+			atomic.AddInt64(&s.FilesSkipped, 1)
+
+			return checkResult{status: checkSkipped, detail: "no checksum"}
 		}
 
-		return missingChecksum(opts, p, cont, s)
+		atomic.AddInt64(&s.FilesFailed, 1)
+
+		return checkResult{status: checkFailed, detail: err.Error()}
 	}
 
 	act, bytesRead, err := fileMultihash(p)
 	if err != nil {
 		atomic.AddInt64(&s.FilesFailed, 1)
 
-		return err
+		return checkResult{status: checkFailed, detail: err.Error()}
 	}
 
-	ok := bytes.Equal(exp, act)
-	if ok {
-		atomic.AddInt64(&s.FilesProcessed, 1)
-		atomic.AddInt64(&s.BytesProcessed, bytesRead)
-	} else {
+	if !bytes.Equal(exp, act) {
 		atomic.AddInt64(&s.FilesFailed, 1)
+
+		return checkResult{
+			status: checkFailed,
+			detail: fmt.Sprintf("checksum mismatch: stored %s, actual %s", exp, act),
+		}
 	}
 
-	reportCheck(opts, p, string(act), ok)
+	atomic.AddInt64(&s.FilesProcessed, 1)
+	atomic.AddInt64(&s.BytesProcessed, bytesRead)
 
-	if !ok && !cont {
-		return errVerification
-	}
-
-	return nil
+	return checkResult{status: checkOK, detail: string(act)}
 }
 
-// missingChecksum records and reports a file that has no stored checksum,
-// returning the verification error unless the caller asked to continue.
-func missingChecksum(opts *options, p string, cont bool, s *Stats) error {
-	atomic.AddInt64(&s.FilesFailed, 1)
+// reportCheck prints a per-file verification result. Failures always go to
+// stderr, even in quiet mode, because they are the errors the operator asked
+// for. OK and skipped lines are printed only in verbose mode. The progress
+// bar is cleared first so the line does not land in the middle of it.
+func reportCheck(opts *options, bar *progressbar.ProgressBar, p string, res checkResult) {
+	if res.status == checkFailed {
+		clearBar(bar)
 
-	if opts.verbose && !opts.quiet {
-		_, _ = fmt.Fprintf(os.Stdout, "%s <none> ERROR\n", p)
+		_, _ = fmt.Fprintf(os.Stderr, "%s ERROR %s\n", p, res.detail)
+
+		return
 	}
 
-	if cont {
-		return nil
-	}
-
-	return errVerification
-}
-
-// reportCheck prints a per-file verification result when verbose output is on.
-func reportCheck(opts *options, p, actual string, ok bool) {
 	if !opts.verbose || opts.quiet {
 		return
 	}
 
-	status := "OK"
-	if !ok {
-		status = "ERROR"
-	}
+	clearBar(bar)
 
-	_, _ = fmt.Fprintf(os.Stdout, "%s %s %s\n", p, actual, status)
+	switch res.status {
+	case checkOK:
+		_, _ = fmt.Fprintf(os.Stdout, "%s %s OK\n", p, res.detail)
+	case checkSkipped:
+		_, _ = fmt.Fprintf(os.Stdout, "%s <none> SKIP\n", p)
+	case checkFailed:
+		// Handled above.
+	}
+}
+
+// clearBar erases the progress bar's current line so other output can be
+// printed cleanly; the bar repaints on its next update.
+func clearBar(bar *progressbar.ProgressBar) {
+	if bar != nil {
+		_ = bar.Clear()
+	}
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -736,7 +771,7 @@ func shouldExclude(opts *options, rel string) bool {
 
 	if opts.excludeDotfiles {
 		for part := range strings.SplitSeq(rel, string(os.PathSeparator)) {
-			if strings.HasPrefix(part, ".") {
+			if isDotfile(part) {
 				return true
 			}
 		}
@@ -749,6 +784,12 @@ func shouldExclude(opts *options, rel string) bool {
 	}
 
 	return false
+}
+
+// isDotfile reports whether a single path component is a hidden entry: it
+// begins with a dot and is not the "." or ".." directory reference.
+func isDotfile(name string) bool {
+	return strings.HasPrefix(name, ".") && name != "." && name != ".."
 }
 
 func hasXattr(path, key string) bool {
