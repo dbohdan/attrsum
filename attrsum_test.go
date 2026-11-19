@@ -240,6 +240,55 @@ func TestSkipBrokenSymlink(t *testing.T) {
 	}
 }
 
+// TestExcludedUnreadableDir covers the case of an unreadable directory
+// (such as .Spotlight-V100 on a macOS volume) that the exclusion rules would
+// prune. filepath.Walk reports the readdir error before the callback can
+// evaluate exclusions, so the walker must apply them to errored entries too.
+func TestExcludedUnreadableDir(t *testing.T) {
+	t.Parallel()
+
+	if os.Geteuid() == 0 {
+		t.Skip("skipping: root bypasses directory permissions")
+	}
+
+	dir := t.TempDir()
+	skipIfNoXattr(t, dir)
+
+	keep := writeFile(t, dir, "keep.txt", "keep")
+	locked := filepath.Join(dir, ".locked")
+
+	err := os.Mkdir(locked, noPerm)
+	if err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	defer func() { _ = os.Chmod(locked, dirPerm) }()
+
+	// Without the exclusion the unreadable directory is a hard error.
+	err = processSumAdd(&options{}, dir, newTestStats(), nil)
+	if err == nil {
+		t.Fatalf("expected permission error without exclusion, got nil")
+	}
+
+	// With the exclusion the directory is pruned and the walk succeeds.
+	opts := &options{excludeDotfiles: true}
+
+	err = processSumAdd(opts, dir, newTestStats(), nil)
+	if err != nil {
+		t.Fatalf("add with excluded unreadable dir: %v", err)
+	}
+
+	_, err = countFiles(opts, dir)
+	if err != nil {
+		t.Fatalf("count with excluded unreadable dir: %v", err)
+	}
+
+	_, err = xattr.Get(keep, checksumKey)
+	if err != nil {
+		t.Fatalf("expected xattr on keep.txt: %v", err)
+	}
+}
+
 func TestPermissionErrors(t *testing.T) {
 	t.Parallel()
 

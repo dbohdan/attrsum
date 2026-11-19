@@ -572,7 +572,7 @@ func countFiles(opts *options, root string) (int64, error) {
 
 	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
-			return err
+			return walkErr(opts, root, p, info, err)
 		}
 
 		// Skip symlinks - note: filepath.Walk uses Lstat, so symlinks are
@@ -653,7 +653,7 @@ func walkAndProcess(
 
 	return filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
-			return err
+			return walkErr(opts, root, p, info, err)
 		}
 
 		skip, skipErr := walkSkip(opts, root, p, info)
@@ -669,6 +669,24 @@ func walkAndProcess(
 
 		return fnErr
 	})
+}
+
+// walkErr decides what a walk callback should return when filepath.Walk
+// reports an error for p. Walk reads a directory's entries before invoking
+// the callback for it, so an unreadable directory arrives here with the
+// readdir error already attached and the exclusion rules have not yet had a
+// chance to prune it. A directory that would be excluded anyway (for example
+// .Spotlight-V100 under --exclude-dotfiles) is therefore skipped silently;
+// every other error aborts the walk. info is nil when Lstat itself failed.
+func walkErr(opts *options, root, p string, info os.FileInfo, err error) error {
+	if info != nil && info.IsDir() {
+		rel, _ := filepath.Rel(root, p)
+		if shouldExclude(opts, rel) {
+			return filepath.SkipDir
+		}
+	}
+
+	return err
 }
 
 // walkSkip reports whether a walked entry should be skipped before the
