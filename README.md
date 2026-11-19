@@ -67,7 +67,7 @@ Flags:
 * `--exclude PATTERN` — skip paths matching rsync/Doublestar glob
 * `--exclude-dotfiles` — skip any path component that starts with `.`
 
-All commands display a progress bar with ETA and print a summary report to stderr on completion (unless `--quiet` is specified).
+All commands print a summary report to stderr on completion (unless `--quiet` is specified). When stderr is a terminal they also display a progress bar with ETA on the last line; per-file output is printed above it. The progress bar is never shown when stderr is redirected to a file or pipe.
 
 `attrsum` **never follows symlinks** and skips non-regular files (sockets, devices, …).
 

@@ -166,24 +166,93 @@ func expandPaths(args []string) ([]string, error) {
 }
 
 // processFunc processes a single path within a command's run loop.
-type processFunc func(opts *options, path string, stats *Stats, bar *progressbar.ProgressBar) error
+type processFunc func(opts *options, path string, stats *Stats, prog *progress) error
 
-// countAndBar counts the files under paths and returns a progress bar sized
-// to that total. It always returns either a non-nil bar or a non-nil error.
-func countAndBar(opts *options, paths []string, desc string) (*progressbar.ProgressBar, error) {
+// progress owns the progress bar and every line of per-file output printed
+// while it is active. The bar lives on the terminal's last line; per-file
+// lines are written above it by erasing the bar, printing the line to its
+// own stream, and redrawing the bar immediately. The library's own redraw
+// throttle is disabled so that redraw is never skipped; instead the
+// per-file tick throttles itself. All methods are safe on a nil receiver
+// and on a progress with no bar (quiet mode, or stderr not a terminal), in
+// which case lines are printed directly.
+type progress struct {
+	bar      *progressbar.ProgressBar
+	count    int64
+	lastDraw time.Time
+}
+
+// newProgress counts the files under paths and returns a progress sized to
+// that total. When the bar would not be shown (quiet mode, or stderr is not
+// a terminal) no counting walk is performed and the returned progress only
+// passes lines through.
+func newProgress(opts *options, paths []string, desc string) (*progress, error) {
+	if opts.quiet || !isTerminal(os.Stderr) {
+		return &progress{}, nil
+	}
+
 	total, err := countFilesMultiple(opts, paths)
 	if err != nil {
 		return nil, err
 	}
 
-	return newProgressBar(total, desc), nil
+	return &progress{bar: newProgressBar(total, desc)}, nil
 }
 
-// finishBar finalizes a progress bar if one is present.
-func finishBar(bar *progressbar.ProgressBar) {
-	if bar != nil {
-		_ = bar.Finish()
+// isTerminal reports whether f is attached to a character device such as a
+// terminal, as opposed to a pipe or regular file.
+func isTerminal(f *os.File) bool {
+	fi, err := f.Stat()
+	if err != nil {
+		return false
 	}
+
+	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// tick records one more processed file, redrawing the bar at most once per
+// progressThrottle.
+func (p *progress) tick() {
+	if p == nil || p.bar == nil {
+		return
+	}
+
+	p.count++
+
+	if time.Since(p.lastDraw) >= progressThrottle {
+		p.draw()
+	}
+}
+
+// draw repaints the bar with the current count.
+func (p *progress) draw() {
+	_ = p.bar.Set64(p.count)
+	p.lastDraw = time.Now()
+}
+
+// printf writes one line of per-file output to w, keeping the bar on the
+// last line of the terminal.
+func (p *progress) printf(w io.Writer, format string, args ...any) {
+	if p == nil || p.bar == nil {
+		_, _ = fmt.Fprintf(w, format, args...)
+
+		return
+	}
+
+	_ = p.bar.Clear()
+	_, _ = fmt.Fprintf(w, format, args...)
+
+	p.draw()
+}
+
+// finish completes the bar, leaving it rendered at 100% on its own line.
+func (p *progress) finish() {
+	if p == nil || p.bar == nil {
+		return
+	}
+
+	_ = p.bar.Set64(p.count)
+	_ = p.bar.Finish()
 }
 
 // runOverPaths runs process over each path, sharing the progress/stats
@@ -196,25 +265,21 @@ func runOverPaths(opts *options, args []string, desc, op string, process process
 
 	stats := &Stats{StartTime: time.Now()}
 
-	var bar *progressbar.ProgressBar
-
-	if !opts.quiet {
-		bar, err = countAndBar(opts, paths, desc)
-		if err != nil {
-			return err
-		}
+	prog, err := newProgress(opts, paths, desc)
+	if err != nil {
+		return err
 	}
 
 	for _, p := range paths {
-		perr := process(opts, p, stats, bar)
+		perr := process(opts, p, stats, prog)
 		if perr != nil {
-			finishBar(bar)
+			prog.finish()
 
 			return perr
 		}
 	}
 
-	finishBar(bar)
+	prog.finish()
 	stats.Print(opts, op)
 
 	return nil
@@ -253,15 +318,15 @@ func newSumCmd(opts *options) *cobra.Command {
 	return cmd
 }
 
-func processSumAdd(opts *options, dir string, stats *Stats, bar *progressbar.ProgressBar) error {
-	return walkAndProcess(opts, dir, stats, bar, func(p string, info os.FileInfo, s *Stats) error {
+func processSumAdd(opts *options, dir string, stats *Stats, prog *progress) error {
+	return walkAndProcess(opts, dir, stats, prog, func(p string, info os.FileInfo, s *Stats) error {
 		if hasXattr(p, checksumKey) {
 			atomic.AddInt64(&s.FilesSkipped, 1)
 
 			return nil
 		}
 
-		err := writeChecksumAndTime(opts, p, info, s)
+		err := writeChecksumAndTime(opts, p, info, s, prog)
 		if err != nil {
 			atomic.AddInt64(&s.FilesFailed, 1)
 
@@ -272,11 +337,11 @@ func processSumAdd(opts *options, dir string, stats *Stats, bar *progressbar.Pro
 	})
 }
 
-func processSumUpdate(opts *options, dir string, stats *Stats, bar *progressbar.ProgressBar) error {
-	return walkAndProcess(opts, dir, stats, bar, func(p string, info os.FileInfo, s *Stats) error {
+func processSumUpdate(opts *options, dir string, stats *Stats, prog *progress) error {
+	return walkAndProcess(opts, dir, stats, prog, func(p string, info os.FileInfo, s *Stats) error {
 		t, err := readSumTime(p)
 		if err != nil || info.ModTime().After(t) {
-			werr := writeChecksumAndTime(opts, p, info, s)
+			werr := writeChecksumAndTime(opts, p, info, s, prog)
 			if werr != nil {
 				atomic.AddInt64(&s.FilesFailed, 1)
 
@@ -292,7 +357,7 @@ func processSumUpdate(opts *options, dir string, stats *Stats, bar *progressbar.
 	})
 }
 
-func writeChecksumAndTime(opts *options, path string, info os.FileInfo, stats *Stats) error {
+func writeChecksumAndTime(opts *options, path string, info os.FileInfo, stats *Stats, prog *progress) error {
 	// Record mtime before hashing to detect modifications during hash.
 	mtimeBefore := info.ModTime()
 
@@ -317,7 +382,7 @@ func writeChecksumAndTime(opts *options, path string, info os.FileInfo, stats *S
 	}
 
 	if opts.verbose && !opts.quiet {
-		_, _ = fmt.Fprintf(os.Stdout, "%s %s written\n", path, hash)
+		prog.printf(os.Stdout, "%s %s written\n", path, hash)
 	}
 
 	// Store the file's mtime as sumtime (not wall-clock time). This makes
@@ -330,7 +395,7 @@ func writeChecksumAndTime(opts *options, path string, info os.FileInfo, stats *S
 	}
 
 	if opts.verbose && !opts.quiet {
-		_, _ = fmt.Fprintf(os.Stdout, "%s %s written\n", path, ts)
+		prog.printf(os.Stdout, "%s %s written\n", path, ts)
 	}
 
 	atomic.AddInt64(&stats.FilesProcessed, 1)
@@ -363,9 +428,9 @@ func newClearCmd(opts *options) *cobra.Command {
 	}
 }
 
-func processClear(opts *options, dir string, stats *Stats, bar *progressbar.ProgressBar) error {
-	return walkAndProcess(opts, dir, stats, bar, func(p string, info os.FileInfo, s *Stats) error {
-		cleared, err := clearOne(opts, p)
+func processClear(opts *options, dir string, stats *Stats, prog *progress) error {
+	return walkAndProcess(opts, dir, stats, prog, func(p string, info os.FileInfo, s *Stats) error {
+		cleared, err := clearOne(opts, p, prog)
 		if err != nil {
 			atomic.AddInt64(&s.FilesFailed, 1)
 
@@ -385,7 +450,7 @@ func processClear(opts *options, dir string, stats *Stats, bar *progressbar.Prog
 
 // clearOne removes both checksum xattrs from a single path, reporting
 // whether any attribute was actually removed.
-func clearOne(opts *options, p string) (bool, error) {
+func clearOne(opts *options, p string, prog *progress) (bool, error) {
 	cleared := false
 
 	for _, k := range []string{checksumKey, sumTimeKey} {
@@ -399,7 +464,7 @@ func clearOne(opts *options, p string) (bool, error) {
 		}
 
 		if opts.verbose && !opts.quiet {
-			_, _ = fmt.Fprintf(os.Stdout, "%s %s removed\n", p, string(v))
+			prog.printf(os.Stdout, "%s %s removed\n", p, string(v))
 		}
 
 		rerr := xattr.Remove(p, k)
@@ -442,26 +507,22 @@ func runCheck(opts *options, args []string) error {
 
 	stats := &Stats{StartTime: time.Now()}
 
-	var bar *progressbar.ProgressBar
-
-	if !opts.quiet {
-		bar, err = countAndBar(opts, paths, "Verifying checksums")
-		if err != nil {
-			return err
-		}
+	prog, err := newProgress(opts, paths, "Verifying checksums")
+	if err != nil {
+		return err
 	}
 
 	for _, p := range paths {
-		perr := processCheck(opts, p, stats, bar)
+		perr := processCheck(opts, p, stats, prog)
 		if perr != nil && !errors.Is(perr, errVerification) {
-			finishBar(bar)
+			prog.finish()
 			stats.Print(opts, "check")
 
 			return perr
 		}
 	}
 
-	finishBar(bar)
+	prog.finish()
 	stats.Print(opts, "check")
 
 	return verificationResult(stats)
@@ -483,12 +544,12 @@ func verificationResult(stats *Stats) error {
 // missing read permission) are reported and counted but never stop the
 // walk; only structural walk errors abort it. The returned error is
 // errVerification when any file under dir failed.
-func processCheck(opts *options, dir string, stats *Stats, bar *progressbar.ProgressBar) error {
+func processCheck(opts *options, dir string, stats *Stats, prog *progress) error {
 	initialFailed := atomic.LoadInt64(&stats.FilesFailed)
 
-	err := walkAndProcess(opts, dir, stats, bar, func(p string, _ os.FileInfo, s *Stats) error {
+	err := walkAndProcess(opts, dir, stats, prog, func(p string, _ os.FileInfo, s *Stats) error {
 		res := checkOne(p, s)
-		reportCheck(opts, bar, p, res)
+		reportCheck(opts, prog, p, res)
 
 		return nil
 	})
@@ -558,15 +619,13 @@ func checkOne(p string, s *Stats) checkResult {
 	return checkResult{status: checkOK, detail: string(act)}
 }
 
-// reportCheck prints a per-file verification result. Failures always go to
-// stderr, even in quiet mode, because they are the errors the operator asked
-// for. OK and skipped lines are printed only in verbose mode. The progress
-// bar is cleared first so the line does not land in the middle of it.
-func reportCheck(opts *options, bar *progressbar.ProgressBar, p string, res checkResult) {
+// reportCheck prints a per-file verification result above the progress bar.
+// Failures always go to stderr, even in quiet mode, because they are the
+// errors the operator asked for. OK and skipped lines are printed only in
+// verbose mode.
+func reportCheck(opts *options, prog *progress, p string, res checkResult) {
 	if res.status == checkFailed {
-		clearBar(bar)
-
-		_, _ = fmt.Fprintf(os.Stderr, "%s ERROR %s\n", p, res.detail)
+		prog.printf(os.Stderr, "%s ERROR %s\n", p, res.detail)
 
 		return
 	}
@@ -575,23 +634,13 @@ func reportCheck(opts *options, bar *progressbar.ProgressBar, p string, res chec
 		return
 	}
 
-	clearBar(bar)
-
 	switch res.status {
 	case checkOK:
-		_, _ = fmt.Fprintf(os.Stdout, "%s %s OK\n", p, res.detail)
+		prog.printf(os.Stdout, "%s %s OK\n", p, res.detail)
 	case checkSkipped:
-		_, _ = fmt.Fprintf(os.Stdout, "%s <none> SKIP\n", p)
+		prog.printf(os.Stdout, "%s <none> SKIP\n", p)
 	case checkFailed:
 		// Handled above.
-	}
-}
-
-// clearBar erases the progress bar's current line so other output can be
-// printed cleanly; the bar repaints on its next update.
-func clearBar(bar *progressbar.ProgressBar) {
-	if bar != nil {
-		_ = bar.Clear()
 	}
 }
 
@@ -655,7 +704,10 @@ func countFilesMultiple(opts *options, roots []string) (int64, error) {
 	return total, nil
 }
 
-// newProgressBar creates a new progress bar with standard options.
+// newProgressBar creates a new progress bar with standard options. The
+// library's redraw throttle is set to zero because progress.tick throttles
+// itself; that way a redraw requested after printing a line is never
+// dropped.
 func newProgressBar(total int64, description string) *progressbar.ProgressBar {
 	return progressbar.NewOptions64(total,
 		progressbar.OptionSetDescription(description),
@@ -663,7 +715,7 @@ func newProgressBar(total int64, description string) *progressbar.ProgressBar {
 		progressbar.OptionShowCount(),
 		progressbar.OptionShowIts(),
 		progressbar.OptionSetItsString("files"),
-		progressbar.OptionThrottle(progressThrottle),
+		progressbar.OptionThrottle(0),
 		progressbar.OptionShowElapsedTimeOnFinish(),
 		progressbar.OptionSetPredictTime(true),
 		progressbar.OptionFullWidth(),
@@ -681,7 +733,7 @@ func walkAndProcess(
 	opts *options,
 	root string,
 	stats *Stats,
-	bar *progressbar.ProgressBar,
+	prog *progress,
 	fn func(string, os.FileInfo, *Stats) error,
 ) error {
 	root = filepath.Clean(root)
@@ -691,16 +743,14 @@ func walkAndProcess(
 			return walkErr(opts, root, p, info, err)
 		}
 
-		skip, skipErr := walkSkip(opts, root, p, info)
+		skip, skipErr := walkSkip(opts, root, p, info, prog)
 		if skip {
 			return skipErr
 		}
 
 		fnErr := fn(p, info, stats)
 
-		if bar != nil {
-			_ = bar.Add(1)
-		}
+		prog.tick()
 
 		return fnErr
 	})
@@ -729,12 +779,12 @@ func walkErr(opts *options, root, p string, info os.FileInfo, err error) error {
 // walk callback should return (filepath.SkipDir to prune an excluded
 // directory, otherwise nil). Symlinks, directories and non-regular files are
 // never checksummed.
-func walkSkip(opts *options, root, p string, info os.FileInfo) (bool, error) {
+func walkSkip(opts *options, root, p string, info os.FileInfo, prog *progress) (bool, error) {
 	// filepath.Walk uses Lstat, so symlinks are reported as ModeSymlink,
 	// never as directories. Walk doesn't follow them.
 	if info.Mode()&os.ModeSymlink != 0 {
 		if opts.verbose && !opts.quiet {
-			log.Printf("skip symlink %s", p)
+			prog.printf(os.Stderr, "skip symlink %s\n", p)
 		}
 
 		return true, nil
@@ -755,7 +805,7 @@ func walkSkip(opts *options, root, p string, info os.FileInfo) (bool, error) {
 
 	if !info.Mode().IsRegular() {
 		if opts.verbose && !opts.quiet {
-			log.Printf("skip non-regular %s", p)
+			prog.printf(os.Stderr, "skip non-regular %s\n", p)
 		}
 
 		return true, nil

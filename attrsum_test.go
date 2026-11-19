@@ -231,6 +231,47 @@ func TestCheckContinuesAfterMismatch(t *testing.T) {
 	}
 }
 
+// TestProgressWithoutBar verifies that per-file output passes straight
+// through when there is no bar (nil progress, or a progress built for a
+// non-terminal), and that ticking such a progress is a no-op.
+func TestProgressWithoutBar(t *testing.T) {
+	t.Parallel()
+
+	var buf strings.Builder
+
+	var nilProg *progress
+
+	nilProg.tick()
+	nilProg.printf(&buf, "a %d\n", 1)
+	nilProg.finish()
+
+	bare := &progress{}
+	bare.tick()
+	bare.printf(&buf, "b %d\n", 2)
+	bare.finish()
+
+	if got, want := buf.String(), "a 1\nb 2\n"; got != want {
+		t.Fatalf("printf output = %q, want %q", got, want)
+	}
+}
+
+// TestIsTerminalRegularFile verifies that a regular file is not mistaken
+// for a terminal, which is what disables the progress bar under redirection.
+func TestIsTerminalRegularFile(t *testing.T) {
+	t.Parallel()
+
+	f, err := os.CreateTemp(t.TempDir(), "notatty")
+	if err != nil {
+		t.Fatalf("create temp: %v", err)
+	}
+
+	defer func() { _ = f.Close() }()
+
+	if isTerminal(f) {
+		t.Fatalf("isTerminal(regular file) = true, want false")
+	}
+}
+
 func TestIsDotfile(t *testing.T) {
 	t.Parallel()
 
