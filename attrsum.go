@@ -306,7 +306,7 @@ func newSumCmd(opts *options) *cobra.Command {
 
 	upd := &cobra.Command{
 		Use:   "update <path>... (use - to read paths from stdin)",
-		Short: "Recalculate checksum when file newer than stored sumtime",
+		Short: "Recompute checksums where the file is newer than its sumtime, write missing ones",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(_ *cobra.Command, a []string) error {
 			return runOverPaths(opts, a, "Updating checksums", "sum update", processSumUpdate)

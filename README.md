@@ -31,10 +31,12 @@ Semantic Versioning 2.0.0 is used for tags.
 ## Usage
 
 ```bash
-# add checksum & timestamp xattrs to every regular file under one or more paths
+# write checksum & timestamp xattrs to regular files that have no checksum yet;
+# files that already carry one are left untouched, even if modified since
 attrsum sum add DIR1 DIR2 file.txt
 
-# update checksum only when file mtime is newer than stored sumtime
+# recompute the checksum where the file mtime is newer than the stored sumtime,
+# and write one where it is missing; unchanged files are skipped
 attrsum sum update DIR1 DIR2
 
 # verify checksums: every mismatch is reported on stderr, files without a
