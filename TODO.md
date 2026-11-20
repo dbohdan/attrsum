@@ -10,10 +10,11 @@
 
 # Status
 
-1.0+
+1.1.0
 
-Tagged 1.0.0 (2025-05-08). Substantial correctness fixes and features
-have landed since the tag.
+Tagged `v1.1.0` (2026-11-19). Release tags carry the `v` prefix so
+`go install git.eeqj.de/sneak/attrsum@latest` resolves them; the 1.0.0
+release is tagged both `1.0.0` and `v1.0.0`.
 
 # Next Step
 
@@ -46,7 +47,6 @@ $(HOME)/Documents/_SYSADMIN/cyberdyne path.
     Getting Started, Rationale, Design, TODO, License, Author (Getting
     Started, Why?, TODO, License exist; Description, Design, Author are
     missing)
-* Tag a patch release to ship the 2026-02-02 correctness fixes
 * Dry-run mode (--dry-run, -n): show what would be done without making
     changes (from README TODO)
 * JSON output (--json) for scripting and integration (from README TODO)
