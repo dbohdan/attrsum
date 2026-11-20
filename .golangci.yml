@@ -12,6 +12,7 @@ linters:
     - depguard         # Dependency allow/block lists
     - godot            # Requires comments to end with periods
     - wsl              # Deprecated, replaced by wsl_v5
+    - gomodguard       # Deprecated, replaced by gomodguard_v2
     - wrapcheck        # Too verbose for internal packages
     - varnamelen       # Short names like db, id are idiomatic Go
 

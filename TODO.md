@@ -53,5 +53,3 @@ $(HOME)/Documents/_SYSADMIN/cyberdyne path.
 * Parallel processing (-j N) with multiple goroutines for faster
     checksumming on large trees (from README TODO)
 * Formalize and document exit codes for scripting (from README TODO)
-* Lint deprecation: `gomodguard` is deprecated since golangci-lint
-    v2.12.0; switch `.golangci.yml` to `gomodguard_v2`
